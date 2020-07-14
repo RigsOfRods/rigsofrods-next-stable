@@ -94,7 +94,8 @@ void Console::CVarSetupBuiltins()
     App::diag_hide_wheel_info    = this->CVarCreate("diag_hide_wheel_info",    "Hide wheel info",            CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_BOOL,    "true");
     App::diag_hide_wheels        = this->CVarCreate("diag_hide_wheels",        "Hide wheels",                CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_BOOL,    "false");
     App::diag_hide_nodes         = this->CVarCreate("diag_hide_nodes",         "Hide nodes",                 CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_BOOL,    "false");
-    App::diag_physics_dt         = this->CVarCreate("diag_physics_dt",          "PhysicsTimeStep",           CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_FLOAT,   "0.0005");             
+    App::diag_physics_dt         = this->CVarCreate("diag_physics_dt",         "PhysicsTimeStep",            CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_FLOAT,   "0.0005");
+    App::diag_import_grp_loose   = this->CVarCreate("diag_import_grp_loose",   "",                           CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_BOOL,    "false");
 
     App::sys_process_dir         = this->CVarCreate("sys_process_dir",         "",                                              CVAR_AUTO_APPLY);
     App::sys_user_dir            = this->CVarCreate("sys_user_dir",            "",                                              CVAR_AUTO_APPLY);
@@ -105,6 +106,7 @@ void Console::CVarSetupBuiltins()
     App::sys_profiler_dir        = this->CVarCreate("sys_profiler_dir",        "Profiler output dir",                           CVAR_AUTO_APPLY);
     App::sys_savegames_dir       = this->CVarCreate("sys_savegames_dir",       "",                                              CVAR_AUTO_APPLY);
     App::sys_screenshot_dir      = this->CVarCreate("sys_screenshot_dir",      "",                                              CVAR_AUTO_APPLY);
+    App::sys_projects_dir        = this->CVarCreate("sys_projects_dir",        "",                                              CVAR_AUTO_APPLY);
 
     App::io_analog_smoothing     = this->CVarCreate("io_analog_smoothing",     "Analog Input Smoothing",     CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_FLOAT,   "1.0");
     App::io_analog_sensitivity   = this->CVarCreate("io_analog_sensitivity",   "Analog Input Sensitivity",   CVAR_ALLOW_STORE | CVAR_AUTO_APPLY | CVAR_TYPE_FLOAT,   "1.0");

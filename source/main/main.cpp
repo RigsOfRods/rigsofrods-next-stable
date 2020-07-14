@@ -142,6 +142,11 @@ int main(int argc, char *argv[])
         }
 
         Settings::getSingleton().LoadRoRCfg(); // Main config file - path obtained from GVars
+        if (!FolderExists(App::sys_projects_dir->GetActiveStr()))
+        {
+            CreateFolder(App::sys_projects_dir->GetActiveStr());
+        }
+
         Settings::getSingleton().ProcessCommandLine(argc, argv);
 
         if (App::app_state->GetPendingEnum<AppState>() == AppState::PRINT_HELP_EXIT)
@@ -222,6 +227,7 @@ int main(int argc, char *argv[])
         }
 
         App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::FLAGS);
+        App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::FONTS);
         App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::ICONS);
         App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::OGRE_CORE);
         App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::WALLPAPERS);
@@ -252,6 +258,7 @@ int main(int argc, char *argv[])
         App::GetContentManager()->InitContentManager();
 
         App::CreateGuiManagerIfNotExists();
+        scene_manager->addRenderQueueListener(&App::GetGuiManager()->GetImGui());
 
         InitDiscord();
 

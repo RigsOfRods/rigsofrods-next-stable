@@ -72,7 +72,6 @@
 /// @author Petr Ohlidal
 class ActorSpawner
 {
-    friend class VideoCamera; // Needs to add log messages
     friend class RoR::FlexFactory; // Needs to use `ComposeName()` and `SetupNewEntity()`
 
 public:
@@ -458,6 +457,8 @@ private:
     void ProcessRotator2(RigDef::Rotator2 & def);
 
     void ProcessScrewprop(RigDef::Screwprop & def);
+
+    void ProcessScript(RigDef::Script & def);
 
     /**
     * Section 'shocks'.
@@ -1067,13 +1068,13 @@ private:
     bool               m_generate_wing_position_lights;
     int                m_first_wing_index;
     Ogre::SceneNode*   m_curr_mirror_prop_scenenode;
-    std::vector<prop_t>       m_props;
+    std::vector<RoR::Prop>    m_props;
     int                       m_driverseat_prop_index;
     std::vector<CabTexcoord>  m_oldstyle_cab_texcoords;
     std::vector<CabSubmesh>   m_oldstyle_cab_submeshes;
     ActorMemoryRequirements   m_memory_requirements;
     RigDef::File::Keyword     m_current_keyword; //!< For error reports
-    std::vector<RoR::GfxActor::NodeGfx> m_gfx_nodes;
+    std::vector<RoR::NodeGfx> m_gfx_nodes;
     CustomMaterial::MirrorPropType         m_curr_mirror_prop_type;
     std::shared_ptr<RigDef::File>          m_file; //!< The parsed input file.
     std::map<Ogre::String, unsigned int>   m_named_nodes;

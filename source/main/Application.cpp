@@ -130,6 +130,7 @@ CVar* diag_hide_wheel_info;
 CVar* diag_hide_wheels;
 CVar* diag_hide_nodes;
 CVar* diag_physics_dt;
+CVar* diag_import_grp_loose;
 
 // System
 CVar* sys_process_dir;
@@ -141,6 +142,7 @@ CVar* sys_resources_dir;
 CVar* sys_profiler_dir;
 CVar* sys_savegames_dir;
 CVar* sys_screenshot_dir;
+CVar* sys_projects_dir;
 
 // Input - Output
 CVar* io_analog_smoothing;

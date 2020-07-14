@@ -2,7 +2,7 @@
     This source file is part of Rigs of Rods
     Copyright 2005-2012 Pierre-Michel Ricordel
     Copyright 2007-2012 Thomas Fischer
-    Copyright 2016-2017 Petr Ohlidal & contributors
+    Copyright 2017-2018 Petr Ohlidal & contributors
 
     For more information, see http://www.rigsofrods.org/
 
@@ -28,10 +28,13 @@
 #include "Application.h"
 #include "Beam.h"
 #include "BeamFactory.h"
+#include "CacheSystem.h"
+#include "ContentManager.h"
 #include "GUIManager.h"
 #include "GUIUtils.h"
 #include "GUI_MainSelector.h"
 #include "InputEngine.h"
+#include "RigEditor.h"
 #include "Language.h"
 #include "Network.h"
 #include "PlatformUtils.h"
@@ -56,13 +59,16 @@ void RoR::GUI::TopMenubar::Update()
     const char* savegames_title = "Saves";
     const char* settings_title = "Settings";
     const char* tools_title = "Tools";
+    const char* projects_title = "Projects";
+    const int NUM_BUTTONS = 6;
 
     float menubar_content_width =
-        (ImGui::GetStyle().ItemSpacing.x * 4) +
-        (ImGui::GetStyle().FramePadding.x * 12) +
+        (ImGui::GetStyle().ItemSpacing.x * (NUM_BUTTONS - 1)) +
+        (ImGui::GetStyle().FramePadding.x * (NUM_BUTTONS * 2)) +
         ImGui::CalcTextSize(sim_title).x +
         ImGui::CalcTextSize(actors_title.ToCStr()).x +
         ImGui::CalcTextSize(savegames_title).x +
+        ImGui::CalcTextSize(projects_title).x +
         ImGui::CalcTextSize(settings_title).x +
         ImGui::CalcTextSize(tools_title).x;
 
@@ -102,6 +108,16 @@ void RoR::GUI::TopMenubar::Update()
     if ((m_open_menu != TopMenu::TOPMENU_ACTORS) && ImGui::IsItemHovered())
     {
         m_open_menu = TopMenu::TOPMENU_ACTORS;
+    }
+
+    ImGui::SameLine();
+
+    // The 'projects' button
+    ImVec2 projects_cursor = ImGui::GetCursorPos();
+    ImGui::Button(projects_title);
+    if ((m_open_menu != TopMenu::TOPMENU_PROJECTS) && ImGui::IsItemHovered())
+    {
+        m_open_menu = TopMenu::TOPMENU_PROJECTS;
     }
 
     ImGui::SameLine();
@@ -280,6 +296,106 @@ void RoR::GUI::TopMenubar::Update()
                 }
 #endif // USE_SOCKETW
             }
+            m_open_menu_hoverbox_min = menu_pos;
+            m_open_menu_hoverbox_max.x = menu_pos.x + ImGui::GetWindowWidth();
+            m_open_menu_hoverbox_max.y = menu_pos.y + ImGui::GetWindowHeight();
+            ImGui::End();
+        }
+        break;
+
+    case TopMenu::TOPMENU_PROJECTS:
+        menu_pos.y = window_pos.y + projects_cursor.y + MENU_Y_OFFSET;
+        menu_pos.x = projects_cursor.x + window_pos.x - ImGui::GetStyle().WindowPadding.x;
+        ImGui::SetNextWindowPos(menu_pos);
+        if (ImGui::Begin("Projects menu", nullptr, static_cast<ImGuiWindowFlags_>(flags)))
+        {
+            CacheSystem::ProjectEntryVec& projects = App::GetCacheSystem()->GetProjectEntries();
+            int id_counter = 0; // Project names may not be unique
+            for (std::unique_ptr<ProjectEntry>& project: projects)
+            {
+                ImGui::PushID(id_counter++);
+                if (ImGui::TreeNode(project->prj_name.c_str())) // TODO: EDIT button
+                {
+                    for (int i = 0; i < (int)project->prj_snapshots.size(); ++i)
+                    {
+                        if (ImGui::Button(project->prj_snapshots[i].prs_name.c_str()))
+                        {
+                            App::GetSimController()->GetRigEditor().LoadSnapshot(project.get(), i);
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+
+            if (projects.size() == 0)
+            {
+                ImGui::TextColored(GRAY_HINT_TEXT, _L("There are no projects"));
+            }
+
+            Actor* src_actor = App::GetSimController()->GetPlayerActor();
+            if (src_actor && src_actor->GetProjectEntry())
+            {
+                ImGui::Separator(); // Current project actions
+
+                std::string example_to_add;
+                if (ImGui::Button(_L("+ Add Example script"))) { example_to_add = "framestep_demo.as"; }
+                if (ImGui::Button(_L("+ Add prototype dash"))) { example_to_add = "framestep_dash_demo.as"; }
+
+                if (example_to_add != "")
+                {
+                    App::GetSimController()->GetRigEditor().AddExampleScriptToSnapshot(example_to_add);
+                    App::GetSimController()->GetRigEditor().SaveSnapshot();
+
+                    ActorModifyRequest rq;
+                    rq.amr_type = ActorModifyRequest::Type::RELOAD;
+                    rq.amr_actor = current_actor;
+                    App::GetSimController()->QueueActorModify(rq);
+                }
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::Button(_L("Refresh list")))
+            {
+                App::GetContentManager()->ReScanProjects(); // TODO: Make it happen asynchronously!
+            }
+
+            if (App::GetSimController()->GetPlayerActor() == nullptr)
+            {
+                ImGui::TextColored(GRAY_HINT_TEXT, _L("Import current vehicle"));
+            }
+            else
+            {
+                
+                Str<200> btn_title;
+                btn_title << "Import '" << src_actor->GetActorDesignName() << "'";
+                if (ImGui::Button(btn_title.ToCStr()))
+                {
+                    // TODO: Make it happen asynchronously!
+                    std::string filename = src_actor->GetActorFileName();
+                    Str<200> display_name;
+                    display_name << "(Imported) " << src_actor->GetActorDesignName();
+                    if (App::GetSimController()->GetRigEditor().CreateProjet(filename, display_name.ToCStr()))
+                    {
+                        App::GetSimController()->GetRigEditor().ImportSnapshotToProject(filename, src_actor->GetDefinition()); // Logs+displays errors
+                    }
+                }
+            }
+
+            bool grp_loose = App::diag_import_grp_loose->GetActiveVal<bool>();
+            if (ImGui::Checkbox(_L("Loose ;grp: import (respawn!)"), &grp_loose))
+            {
+                App::diag_import_grp_loose->SetActiveVal(grp_loose);
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::BeginTooltip();
+                ImGui::Text(_L("Accept all ';' comments as ';grp:' comments. Takes effect after vehicle reload."));
+                ImGui::EndTooltip();
+            }
+
+            // Finalize menu panel
             m_open_menu_hoverbox_min = menu_pos;
             m_open_menu_hoverbox_max.x = menu_pos.x + ImGui::GetWindowWidth();
             m_open_menu_hoverbox_max.y = menu_pos.y + ImGui::GetWindowHeight();

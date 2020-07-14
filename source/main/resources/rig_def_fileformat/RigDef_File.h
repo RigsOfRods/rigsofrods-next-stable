@@ -2,7 +2,7 @@
     This source file is part of Rigs of Rods
     Copyright 2005-2012 Pierre-Michel Ricordel
     Copyright 2007-2012 Thomas Fischer
-    Copyright 2013-2017 Petr Ohlidal & contributors
+    Copyright 2013-2020 Petr Ohlidal
 
     For more information, see http://www.rigsofrods.org/
 
@@ -465,7 +465,8 @@ struct Beam
         options(0),
         extension_break_limit(0), /* This is default */
         _has_extension_break_limit(false),
-        detacher_group(0) /* 0 = Default detacher group */
+        detacher_group(0), /* 0 = Default detacher group */
+        editor_group_id(-1)
     {}
 
     BITMASK_PROPERTY(options, 1, OPTION_i_INVISIBLE, HasFlag_i_Invisible, SetFlag_i_Invisible);
@@ -478,6 +479,7 @@ struct Beam
     bool _has_extension_break_limit;
     int detacher_group;
     std::shared_ptr<BeamDefaults> defaults;
+    int editor_group_id;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -562,16 +564,10 @@ struct CruiseControl
 
 struct Author
 {
-    Author():
-        forum_account_id(0),
-        _has_forum_account(false)
-    {}
-
     Ogre::String type;
-    unsigned int forum_account_id;
+    int forum_account_id = -1; // -1 = invalid
     Ogre::String name;
     Ogre::String email;
-    bool _has_forum_account;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -953,7 +949,7 @@ struct Flare2
         size(-1)
     {}
 
-    enum Type
+    enum Type: char
     {
         TYPE_f_HEADLIGHT     = 'f',
         TYPE_b_BRAKELIGHT    = 'b',
@@ -962,7 +958,7 @@ struct Flare2
         TYPE_R_REVERSE_LIGHT = 'R',
         TYPE_u_USER          = 'u',
 
-        TYPE_INVALID         = 0xFFFFFFFF
+        TYPE_INVALID         = 'n'
     };
 
     Node::Ref reference_node;
@@ -1535,6 +1531,8 @@ struct ManagedMaterial
     {
         return (specular_map.length() != 0 && specular_map[0] != '-');
     }
+
+    static const char* TypeToStr(Type type);
 };
 
 /* -------------------------------------------------------------------------- */
@@ -1631,7 +1629,7 @@ struct Prop
     Prop():
         offset(Ogre::Vector3::ZERO),
         rotation(Ogre::Vector3::ZERO),
-        special(SPECIAL_INVALID)
+        special(SPECIAL_NONE)
     {}
 
     /* IMPORTANT! Values must match results from Regexes::SPECIAL_PROPS */
@@ -1649,7 +1647,7 @@ struct Prop
         SPECIAL_REDBEACON,
         SPECIAL_LIGHTBAR,
 
-        SPECIAL_INVALID = 0xFFFFFFFF
+        SPECIAL_NONE = 0xFFFFFFFF
     };
 
     Node::Ref reference_node;
@@ -1727,6 +1725,31 @@ struct Screwprop
     Node::Ref back_node;
     Node::Ref top_node;
     float power;
+};
+
+/* -------------------------------------------------------------------------- */
+/* Section SCRIPTS                                                            */
+/* -------------------------------------------------------------------------- */
+
+struct Script
+{
+    enum Type
+    {
+        TYPE_INVALID,
+        TYPE_FRAMESTEP,
+        TYPE_SIMSTEP
+    };
+
+    Script()
+    {}
+
+    Script(Type t, std::string const& fname, std::string const& arg)
+        :type(t), filename(fname), arguments(arg)
+    {}
+
+    Type        type = TYPE_INVALID;
+    std::string filename;
+    std::string arguments;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2033,6 +2056,13 @@ struct Wing
 
 struct File
 {
+    /// Group of elements of same type, formed by i.e. ';grp:NAME' comments in nodews/beams
+    struct EditorGroup
+    {
+        EditorGroup(const char* _name): name(_name) {}
+        std::string name;
+    }; // more attributes may be needed...
+
     /** Modular part of vehicle (part of file wrapped in 'section ~ end_section' tags)
     */
     struct Module
@@ -2050,6 +2080,7 @@ struct File
         std::shared_ptr<AntiLockBrakes>    anti_lock_brakes;
         std::vector<Axle>                  axles;
         std::vector<Beam>                  beams;
+        std::vector<EditorGroup>           beam_editor_groups; // Originally ';grp:NAME' comments from Editorizer tool
         std::shared_ptr<Brakes>            brakes;
         std::vector<Camera>                cameras;
         std::vector<CameraRail>            camera_rails;
@@ -2078,6 +2109,7 @@ struct File
         std::vector<MaterialFlareBinding>  material_flare_bindings;
         std::vector<MeshWheel>             mesh_wheels;
         std::vector<Node>                  nodes; /* Nodes and Nodes2 are unified in this parser */
+        std::vector<EditorGroup>           node_editor_groups; // Originally ';grp:NAME' comments from Editorizer tool
         std::vector<NodeCollision>         node_collisions;
         std::vector<Particle>              particles;
         std::vector<Pistonprop>            pistonprops;
@@ -2088,6 +2120,7 @@ struct File
         std::vector<Rotator>               rotators;
         std::vector<Rotator2>              rotators_2;
         std::vector<Screwprop>             screwprops;
+        std::vector<Script>                scripts;
         std::vector<Shock>                 shocks;
         std::vector<Shock2>                shocks_2;
         std::vector<Shock3>                shocks_3;
@@ -2192,6 +2225,7 @@ struct File
         KEYWORD_ROTATORS,
         KEYWORD_ROTATORS2,
         KEYWORD_SCREWPROPS,
+        KEYWORD_SCRIPTS,
         KEYWORD_SECTION,
         KEYWORD_SECTIONCONFIG,
         KEYWORD_SET_BEAM_DEFAULTS,
@@ -2283,6 +2317,7 @@ struct File
         SECTION_ROTATORS,
         SECTION_ROTATORS_2,
         SECTION_SCREWPROPS,
+        SECTION_SCRIPTS,
         SECTION_SHOCKS,
         SECTION_SHOCKS_2,
         SECTION_SHOCKS_3,

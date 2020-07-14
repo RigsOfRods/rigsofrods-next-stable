@@ -2,7 +2,7 @@
     This source file is part of Rigs of Rods
     Copyright 2005-2012 Pierre-Michel Ricordel
     Copyright 2007-2012 Thomas Fischer
-    Copyright 2013-2017 Petr Ohlidal & contributors
+    Copyright 2013-2018 Petr Ohlidal & contributors
 
     For more information, see http://www.rigsofrods.org/
 
@@ -48,6 +48,9 @@ namespace RoR
     class  MainMenu;
     class  OgreSubsystem;
     struct PlatformUtils;
+    struct ProjectEntry;
+    struct Prop;
+    struct PropAnim;
     class  Renderdash;
     class  RigLoadingProfiler;
     class  SceneMouse;
@@ -105,7 +108,6 @@ struct wing_t;
 struct command_t;
 struct rotator_t;
 struct flare_t;
-struct prop_t;
 struct rope_t;
 struct exhaust_t;
 struct cparticle_t;
@@ -190,7 +192,6 @@ class Sound;
 class SoundManager;
 class SoundScriptInstance;
 class SoundScriptManager;
-class SurveyMapEntity;
 class SurveyMapManager;
 class Task;
 class TerrainGeometryManager;

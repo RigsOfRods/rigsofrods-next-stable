@@ -49,6 +49,7 @@ set(SOURCE_FILES
         gfx/DustPool.{h,cpp}
         gfx/EnvironmentMap.{h,cpp}
         gfx/GfxActor.{h,cpp}
+        gfx/GfxData.h
         gfx/GfxScene.{h,cpp}
         gfx/HydraxWater.{h,cpp}
         gfx/IWater.h
@@ -121,12 +122,14 @@ set(SOURCE_FILES
         gui/imgui/imgui.{h,cpp}
         gui/imgui/imgui_demo.cpp
         gui/imgui/imgui_draw.cpp
+        gui/imgui/imgui_widgets.cpp
+        gui/imgui/OgreImGuiOverlay.{h,cpp}
         gui/imgui/OgreImGui.{h,cpp}
         gui/imgui/imconfig.h
         gui/imgui/imgui_internal.h
-        gui/imgui/stb_rect_pack.h
-        gui/imgui/stb_textedit.h
-        gui/imgui/stb_truetype.h
+        gui/imgui/imstb_rectpack.h
+        gui/imgui/imstb_textedit.h
+        gui/imgui/imstb_truetype.h
         gui/mygui/Attribute.h
         gui/mygui/BaseLayout.h
         gui/mygui/Dialog.{h,cpp}
@@ -162,6 +165,7 @@ set(SOURCE_FILES
         physics/BeamSlideNode.cpp
         physics/CmdKeyInertia.{h,cpp}
         physics/Differentials.{h,cpp}
+        physics/RigEditor.{h,cpp}
         physics/RigSpawner.{h,cpp}
         physics/RigSpawner_ProcessControl.cpp
         physics/Savegame.cpp
@@ -256,7 +260,9 @@ if (ROR_USE_ANGELSCRIPT)
     list(APPEND SOURCE_FILES
             scripting/GameScript.{h,cpp}
             scripting/LocalStorage.{h,cpp}
-            scripting/OgreAngelscript.{h,cpp}
+            scripting/FrameStepAngelscript.cpp
+            scripting/OgreAngelscript.cpp
+            scripting/ImGuiAngelscript.cpp
             scripting/OgreScriptBuilder.{h,cpp}
             scripting/ScriptEngine.{h,cpp}
             )

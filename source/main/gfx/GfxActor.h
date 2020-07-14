@@ -26,9 +26,12 @@
 
 #pragma once
 
+#include "AutoPilot.h"
 #include "Differentials.h"
 #include "ForwardDeclarations.h"
+#include "GfxData.h"
 #include "RigDef_Prerequisites.h"
+#include "ScriptEngine.h"
 #include "ThreadPool.h" // class Task
 
 #include <OgreAxisAlignedBox.h>
@@ -49,29 +52,12 @@ class GfxActor
 
 public:
 
-    struct FlareMaterial
-    {
-        int               flare_index;
-        Ogre::MaterialPtr mat_instance;
-        Ogre::ColourValue emissive_color;
-    };
-
     enum class VideoCamState
     {
         VCSTATE_INVALID,
         VCSTATE_DISABLED,
         VCSTATE_ENABLED_OFFLINE,
         VCSTATE_ENABLED_ONLINE,
-    };
-
-    enum class VideoCamType
-    {
-        VCTYPE_INVALID,
-        VCTYPE_VIDEOCAM,
-        VCTYPE_TRACKING_VIDEOCAM,
-        VCTYPE_MIRROR,
-        VCTYPE_MIRROR_PROP_LEFT, ///< The classic 'special prop/rear view mirror'
-        VCTYPE_MIRROR_PROP_RIGHT, ///< The classic 'special prop/rear view mirror'
     };
 
     enum class DebugViewType
@@ -87,93 +73,14 @@ public:
         DEBUGVIEW_SUBMESH,
     };
 
-    /// An Ogre::Camera mounted on the actor and rendering into
-    /// either in-scene texture or external window.
-    struct VideoCamera
-    {
-        VideoCamera();
-
-        VideoCamType         vcam_type;          // old 'camRole'
-        uint16_t             vcam_node_center;   // old 'nref'
-        uint16_t             vcam_node_dir_y;    // old 'ny'
-        uint16_t             vcam_node_dir_z;    // old 'nz'
-        uint16_t             vcam_node_alt_pos;  // old 'camNode'
-        uint16_t             vcam_node_lookat;   // old 'lookat' - only present for type=VCTYPE_TRACK_CAM
-        Ogre::Quaternion     vcam_rotation;      // old 'rotation'
-        Ogre::Vector3        vcam_pos_offset;    // old 'offset'
-        Ogre::MaterialPtr    vcam_material;      // old 'mat' + 'materialName'
-        std::string          vcam_off_tex_name;  // old 'disabledTexture' - used when videocamera is offline.
-        Ogre::Camera*        vcam_ogre_camera;   // old 'mVidCam'
-        Ogre::RenderTexture* vcam_render_target; // old 'rttTex'
-        Ogre::TexturePtr     vcam_render_tex;
-        Ogre::SceneNode*     vcam_debug_node;    // old 'debugNode'
-        Ogre::RenderWindow*  vcam_render_window; // old 'rwMirror'
-        Ogre::SceneNode*     vcam_prop_scenenode; // Only for type=MIRROR_PROP_*
-    };
-
-    /// Gfx attributes/state of a softbody node
-    struct NodeGfx
-    {
-        NodeGfx(uint16_t node_idx);
-
-        float      nx_wet_time_sec; //!< 'Wet' means "already out of water, producing dripping particles". Set to -1 when not 'wet'.
-        uint16_t   nx_node_idx;
-
-        // Bit flags
-        bool       nx_no_particles:1;     //!< User-defined attr; disable all particles
-        bool       nx_may_get_wet:1;      //!< Attr; enables water drip and vapour
-        bool       nx_is_hot:1;           //!< User-defined attr; emits vapour particles when in contact with water.
-        bool       nx_under_water_prev:1; //!< State
-        bool       nx_no_sparks:1;        //!< User-defined attr; 
-
-    }; // more to come... ~only_a_ptr, 04/2018
-
-    /// Copy of node simulation state
-    struct NodeData
-    {
-        Ogre::Vector3 AbsPosition;
-        bool nd_has_contact:1;
-        bool nd_is_wet:1;
-    };
-
-    /// Visuals of softbody beam (`beam_t` struct); Partially updated along with SimBuffer
-    struct Rod
-    {
-        // We don't keep pointer to the Ogre::Entity - we rely on the SceneNode keeping it attached all the time.
-        Ogre::SceneNode* rod_scenenode;
-        uint16_t         rod_beam_index;  //!< Index of the associated `beam_t` instance; assumes Actor has at most 65536 beams (RoR doesn't have a soft limit now, but until v0.4.8 it was 5000 beams).
-        uint16_t         rod_diameter_mm; //!< Diameter in millimeters
-
-        // Assumption: Actor has at most 65536 nodes (RoR doesn't have a soft limit right now, but until v0.4.8 it was 1000 nodes).
-        uint16_t         rod_node1;         //!< Node index - may change during simulation!
-        uint16_t         rod_node2;         //!< Node index - may change during simulation!
-        Actor*           rod_target_actor;
-        bool             rod_is_visible;
-    };
-
-    struct WheelGfx
-    {
-        WheelGfx(): wx_flex_mesh(nullptr), wx_scenenode(nullptr), wx_is_meshwheel(false) {}
-
-        Flexable*        wx_flex_mesh;
-        Ogre::SceneNode* wx_scenenode;
-        bool             wx_is_meshwheel;
-    };
-
-    struct AirbrakeGfx
-    {
-        Ogre::MeshPtr    abx_mesh;
-        Ogre::SceneNode* abx_scenenode;
-        Ogre::Entity*    abx_entity;
-        Ogre::Vector3    abx_offset;
-        uint16_t         abx_ref_node;
-        uint16_t         abx_x_node;
-        uint16_t         abx_y_node;
-    };
-
     struct SimBuffer /// Buffered simulation data
     {
-        SimBuffer();
+        struct NodeSB
+        {
+            Ogre::Vector3 AbsPosition; // classic name
+            bool nd_has_contact:1;
+            bool nd_is_wet:1;
+        };
 
         struct ScrewPropSB
         {
@@ -206,58 +113,71 @@ public:
             float simbuf_ab_ratio;
         };
 
-        std::unique_ptr<NodeData>   simbuf_nodes;
-        Ogre::Vector3               simbuf_pos;
-        Ogre::Vector3               simbuf_node0_velo;
-        bool                        simbuf_live_local;
-        bool                        simbuf_physics_paused;
-        float                       simbuf_rotation;
-        float                       simbuf_tyre_pressure;
-        Ogre::AxisAlignedBox        simbuf_aabb;
+        std::unique_ptr<NodeSB>     simbuf_nodes;
+        Ogre::Vector3               simbuf_pos                = Ogre::Vector3::ZERO;
+        Ogre::Vector3               simbuf_node0_velo         = Ogre::Vector3::ZERO;
+        bool                        simbuf_live_local         = false;
+        bool                        simbuf_physics_paused     = false;
+        float                       simbuf_rotation           = 0;
+        float                       simbuf_tyre_pressure      = 0;
+        Ogre::AxisAlignedBox        simbuf_aabb               = Ogre::AxisAlignedBox::BOX_NULL;
         std::string                 simbuf_net_username;
-        bool                        simbuf_is_remote;
-        int                         simbuf_gear;
-        int                         simbuf_autoshift;
-        float                       simbuf_wheel_speed;
-        float                       simbuf_engine_rpm;
-        float                       simbuf_engine_crankfactor;
-        float                       simbuf_engine_turbo_psi;
-        float                       simbuf_engine_accel;
-        float                       simbuf_engine_torque;
-        float                       simbuf_inputshaft_rpm; // Land vehicle only
-        float                       simbuf_drive_ratio; // Land vehicle only
-        bool                        simbuf_beaconlight_active;
-        float                       simbuf_hydro_dir_state; // State of steering actuator ('hydro'), for steeringwheel display
-        float                       simbuf_hydro_aileron_state;
-        float                       simbuf_hydro_elevator_state;
-        float                       simbuf_hydro_aero_rudder_state;
-        int                         simbuf_cur_cinecam;
+        bool                        simbuf_is_remote          = false;
+        float                       simbuf_wheel_speed        = 0;
+        float                       simbuf_hydro_dir_state    = 0;     // State of steering actuator ('hydro'), for steeringwheel display
+        float                       simbuf_hydro_aileron_state = 0;
+        float                       simbuf_hydro_elevator_state = 0;
+        float                       simbuf_hydro_aero_rudder_state = 0;
+        int                         simbuf_cur_cinecam        = 0;
         std::vector<ScrewPropSB>    simbuf_screwprops;
         std::vector<CommandKeySB>   simbuf_commandkey;
         std::vector<AeroEngineSB>   simbuf_aeroengines;
         std::vector<AirbrakeSB>     simbuf_airbrakes;
-        DiffType                    simbuf_diff_type;
-        bool                        simbuf_parking_brake;
-        float                       simbuf_brake;
-        float                       simbuf_clutch;
-        int                         simbuf_aero_flap_state;
-        int                         simbuf_airbrake_state;
-        float                       simbuf_wing4_aoa;
-        bool                        simbuf_headlight_on;
-        Ogre::Vector3               simbuf_direction; //!< Output of `Actor::getDirection()`
-        float                       simbuf_top_speed;
+        DiffType                    simbuf_diff_type          = DiffType::SPLIT_DIFF;
+        bool                        simbuf_parking_brake      = false;
+        float                       simbuf_brake              = 0;
+        int                         simbuf_aero_flap_state    = 0;
+        int                         simbuf_airbrake_state     = 0;
+        float                       simbuf_wing4_aoa          = 0;
+        Ogre::Vector3               simbuf_direction          = Ogre::Vector3::ZERO;         //!< Output of `Actor::getDirection()`
+        float                       simbuf_top_speed          = 0;
+        bool                        simbuf_hook_locked        = false;
+        int                         simbuf_ties_secured_state = 0; //!< 0=unlocked, 1=prelock, 2=locked
+        bool                        simbuf_hydropump_ready    = false;
+        int                         simbuf_tc_dashboard_mode  = 0; //!< Traction control; 0 = not present, 1 = off, 2 = on, 3 = active
+        int                         simbuf_alb_dashboard_mode = 0; //!< Anti-Lock Brake; 0 = not present, 1 = off, 2 = on, 3 = active
+        // Lights
+        bool                        simbuf_beaconlight_active = false;
+        bool                        simbuf_headlight_on       = false;
+        bool                        simbuf_turn_signal_left   = false;
+        bool                        simbuf_turn_signal_right  = false;
         // Autopilot
-        int                         simbuf_ap_heading_mode;
-        int                         simbuf_ap_heading_value;
-        int                         simbuf_ap_alt_mode;
-        int                         simbuf_ap_alt_value;
-        bool                        simbuf_ap_ias_mode;
-        int                         simbuf_ap_ias_value;
-        bool                        simbuf_ap_gpws_mode;
-        bool                        simbuf_ap_ils_available;
-        float                       simbuf_ap_ils_vdev;
-        float                       simbuf_ap_ils_hdev;
-        int                         simbuf_ap_vs_value;
+        int                         simbuf_ap_heading_mode    = Autopilot::HEADING_NONE;
+        int                         simbuf_ap_heading_value   = 0;
+        int                         simbuf_ap_alt_mode        = Autopilot::ALT_NONE;
+        int                         simbuf_ap_alt_value       = 1000; // from AutoPilot::reset()
+        bool                        simbuf_ap_ias_mode        = false;
+        int                         simbuf_ap_ias_value       = 150; // from AutoPilot::reset()
+        bool                        simbuf_ap_gpws_mode       = false;
+        bool                        simbuf_ap_ils_available   = false;
+        float                       simbuf_ap_ils_vdev        = 0;
+        float                       simbuf_ap_ils_hdev        = 0;
+        int                         simbuf_ap_vs_value        = 0;
+        // Engine & powertrain
+        int                         simbuf_gear               = 0;
+        int                         simbuf_autoshift          = 0;
+        float                       simbuf_engine_rpm         = 0;
+        float                       simbuf_engine_crankfactor = 0;
+        float                       simbuf_engine_turbo_psi   = 0;
+        float                       simbuf_engine_accel       = 0;
+        float                       simbuf_engine_torque      = 0;
+        float                       simbuf_inputshaft_rpm     = 0;     // Land vehicle only
+        float                       simbuf_drive_ratio        = 0;     // Land vehicle only
+        float                       simbuf_clutch             = 0;
+        float                       simbuf_clutch_force       = 0;
+        float                       simbuf_clutch_torque      = 0;
+        bool                        simbuf_engine_ignition    = false;
+        bool                        simbuf_engine_running     = false;
     };
 
     struct Attributes    //!< Actor visual attributes
@@ -276,7 +196,7 @@ public:
     };
 
     GfxActor(Actor* actor, ActorSpawner* spawner, std::string ogre_resource_group,
-        std::vector<NodeGfx>& gfx_nodes, std::vector<prop_t>& props, int driverseat_prop_idx, RoR::Renderdash* renderdash);
+        std::vector<NodeGfx>& gfx_nodes, std::vector<Prop>& props, int driverseat_prop_idx, RoR::Renderdash* renderdash);
 
     ~GfxActor();
 
@@ -330,9 +250,7 @@ public:
     inline VideoCamState      GetVideoCamState   () const                 { return m_vidcam_state; }
     inline DebugViewType      GetDebugView       () const                 { return m_debug_view; }
     SimBuffer &               GetSimDataBuffer   ()                       { return m_simbuf; }
-    NodeData*                 GetSimNodeBuffer   ()                       { return m_simbuf.simbuf_nodes.get(); }
-    void                      SetSurveyMapEntity (SurveyMapEntity* e)     { m_survey_map_entity = e; }
-    SurveyMapEntity*          GetSurveyMapEntity ()                       { return m_survey_map_entity; }
+    SimBuffer::NodeSB*        GetSimNodeBuffer   ()                       { return m_simbuf.simbuf_nodes.get(); }
     std::set<GfxActor*>       GetLinkedGfxActors ()                       { return m_linked_gfx_actors; }
     Ogre::String              GetResourceGroup   ()                       { return m_custom_resource_group; }
     std::string               FetchActorDesignName() const;
@@ -340,7 +258,7 @@ public:
     int                       FetchNumNodes      () const ;
     int                       FetchNumWheelNodes () const ;
     bool                 HasDriverSeatProp   () const { return m_driverseat_prop_index != -1; }
-    void                 UpdateBeaconFlare   (prop_t & prop, float dt, bool is_player_actor);
+    void                 UpdateBeaconFlare   (Prop & prop, float dt, bool is_player_actor);
     void                 UpdateProps         (float dt, bool is_player_actor);
     void                 UpdatePropAnimations(float dt, bool is_player_connected);
     void                 SetPropsVisible     (bool visible);
@@ -349,6 +267,8 @@ public:
     void                 CalcPropAnimation   (const int flag_state, float& cstate, int& div, float timer,
                                               const float lower_limit, const float upper_limit, const float option3);
     void                 UpdateFlares        (float dt_sec, bool is_player);
+    void                 AddScript           (ScriptUnit s) { m_framestep_scripts.push_back(s); }
+    void                 RunScripts          ();
 
 private:
 
@@ -364,7 +284,7 @@ private:
     DebugViewType               m_last_debug_view;
     std::vector<NodeGfx>        m_gfx_nodes;
     std::vector<AirbrakeGfx>    m_gfx_airbrakes;
-    std::vector<prop_t>         m_props;
+    std::vector<Prop>           m_props;
     std::vector<FlexBody*>      m_flexbodies;
     int                         m_driverseat_prop_index;
     Attributes                  m_attr;
@@ -385,12 +305,11 @@ private:
     float                       m_prop_anim_shift_timer;
     int                         m_prop_anim_prev_gear;
     std::set<GfxActor*>         m_linked_gfx_actors;
+    std::vector<ScriptUnit>     m_framestep_scripts;
 
     bool                        m_initialized;
 
     SimBuffer                   m_simbuf;
-
-    SurveyMapEntity*            m_survey_map_entity;
 
     // Old cab mesh
     FlexObj*                    m_cab_mesh;

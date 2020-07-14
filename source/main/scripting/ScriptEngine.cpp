@@ -47,7 +47,6 @@
 #include "Console.h"
 #include "GameScript.h"
 #include "LocalStorage.h"
-#include "OgreAngelscript.h"
 #include "OgreScriptBuilder.h"
 #include "OgreSubsystem.h"
 #include "PlatformUtils.h"
@@ -59,6 +58,7 @@ const char *ScriptEngine::moduleName = "RoRScript";
 
 using namespace Ogre;
 using namespace RoR;
+using namespace AngelScript;
 
 // some hacky functions
 
@@ -154,7 +154,7 @@ void ScriptEngine::init()
     AngelScript::RegisterScriptDictionary(engine);
 
     // register some Ogre objects like the vector3 and the quaternion
-    registerOgreObjects(engine);
+    RegisterOgreObjects(engine);
 
     // Register the local storage object.
     // This needs to be done after the registration of the ogre objects!
@@ -382,6 +382,18 @@ void ScriptEngine::init()
     result = engine->RegisterGlobalProperty("GameScriptClass game", gamescript); MYASSERT(result>=0);
     //result = engine->RegisterGlobalProperty("CacheSystemClass cache", &CacheSystem::getSingleton()); MYASSERT(result>=0);
 
+    // Script virtual machine for framestep logic (asynchronous with simulation)
+    m_engine_frame = AngelScript::asCreateScriptEngine(ANGELSCRIPT_VERSION);
+    m_engine_frame->SetEngineProperty(asEP_COPY_SCRIPT_SECTIONS, true); // Needed??
+    m_engine_frame->SetEngineProperty(asEP_ALLOW_UNSAFE_REFERENCES, true); // Needed for ImGui
+    m_engine_frame->SetMessageCallback(AngelScript::asMETHOD(ScriptEngine,msgCallback), this, AngelScript::asCALL_THISCALL);
+    AngelScript::RegisterStdString(m_engine_frame);
+    //AngelScript::RegisterStdStringUtils(m_engine_frame);
+    AngelScript::RegisterScriptMath(m_engine_frame);
+    m_engine_frame->RegisterGlobalFunction("void log(const string &in)", AngelScript::asFUNCTION(logString), AngelScript::asCALL_CDECL);
+    RegisterOgreObjects(m_engine_frame);
+    RegisterImGuiBindings(m_engine_frame);
+    RegisterFrameStepInterface(m_engine_frame);
     SLOG("Type registrations done. If you see no error above everything should be working");
 }
 
@@ -714,7 +726,85 @@ void ScriptEngine::triggerEvent(int eventnum, int value)
     }
 }
 
-int ScriptEngine::loadScript(String _scriptName)
+bool ScriptEngine::loadActorScript(Actor* actor, RigDef::Script& def)
+{
+    if (def.type != RigDef::Script::TYPE_FRAMESTEP)
+    {
+        RoR::LogFormat("[RoR|Scripting] Ignoring script '%s' - unsupported type %d", def.filename.c_str(), (int)def.type);
+        return false;
+    }
+
+    asIScriptEngine* engine = m_engine_frame;
+    Str<100> module_name;
+    module_name << def.filename << "@" << actor->ar_filename << "~" << actor->ar_instance_id;
+    asIScriptModule* module = engine->GetModule(module_name, asGM_ALWAYS_CREATE);
+    if (!module)
+    {
+        RoR::LogFormat("[RoR|Scripting] Ignoring script '%s' - Failed to create AngelScript module '%s'", def.filename.c_str(), module_name.ToCStr());
+        return false;
+    }
+
+    try
+    {
+        Ogre::DataStreamPtr stream = Ogre::ResourceGroupManager::getSingleton()
+            .openResource(def.filename, actor->GetGfxActor()->GetResourceGroup(),
+            /*searchGroupsIfNotFound=*/false);
+        Ogre::String code = stream->getAsString();
+        int res = module->AddScriptSection(def.filename.c_str(), code.c_str(), code.length());
+        if (res != asSUCCESS)
+        {
+            RoR::LogFormat("[RoR|Scripting] Ignoring script '%s' - Failed to `AddScriptSection()`, return code: %d", def.filename.c_str(), res);
+            return false;
+        }
+    }
+    catch (Ogre::Exception& e)
+    {
+        RoR::LogFormat("[RoR|Scripting] Failed to load '%s', message: %s",
+            def.filename.c_str(), e.getFullDescription().c_str());
+        return false;
+    }
+    int res = module->Build();
+    if (res != asSUCCESS)
+    {
+        RoR::LogFormat("[RoR|Scripting] Ignoring script '%s' - Failed to `Build()` AngelScript module, return code: %d", def.filename.c_str(), res);
+        return false;
+    }
+
+    const char* const SETUP_DECL = "int setup(string)";
+    const char* const LOOP_DECL = "int loop(GfxActor@)";
+    asIScriptFunction* setup_fn = module->GetFunctionByDecl(SETUP_DECL);
+    asIScriptFunction* loop_fn = module->GetFunctionByDecl(LOOP_DECL);
+
+    if (!setup_fn || !loop_fn)
+    {
+        Str<1000> msg;
+        msg << "Script '" << def.filename << "' (frame-step) is missing mandatory function(s): ";
+        if (!setup_fn) { msg << "`" << SETUP_DECL << "` "; }
+        if (!loop_fn) { msg << "`" << LOOP_DECL << "` "; }
+        App::GetConsole()->putMessage(Console::CONSOLE_MSGTYPE_INFO, Console::CONSOLE_SYSTEM_ERROR, msg.ToCStr());
+        return false;
+    }        
+
+    asIScriptContext* context = engine->CreateContext();
+    if (context->Prepare(setup_fn) != asSUCCESS)
+        return false;
+
+    if (context->SetArgObject(0, &def.arguments) != asSUCCESS)
+        return false;
+
+    if (context->Execute() != asEXECUTION_FINISHED)
+        return false;
+
+    ScriptUnit unit;
+    unit.su_module = module;
+    unit.su_loop_fn = loop_fn;
+    unit.su_context = context;
+
+    actor->GetGfxActor()->AddScript(unit);
+    return true;
+}
+
+int ScriptEngine::loadTerrainScript(String _scriptName)
 {
     scriptName = _scriptName;
 

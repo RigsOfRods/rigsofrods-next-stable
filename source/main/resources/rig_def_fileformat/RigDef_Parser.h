@@ -165,6 +165,7 @@ private:
     void ParseRopes();
     void ParseRotatorsUnified();
     void ParseScrewprops();
+    void ParseScripts();
     void ParseSetCollisionRange();
     void ParseSetSkeletonSettings();
     void ParseShock();
@@ -255,6 +256,8 @@ private:
     void _ParseCameraSettings(CameraSettings & camera_settings, Ogre::String input_str);
 
     void _ParseNodeOptions(unsigned int & options, const std::string & options_str);
+
+    void ProcessCommentLine();
 
     void ParseOptionalInertia(Inertia& inertia, int index);
 

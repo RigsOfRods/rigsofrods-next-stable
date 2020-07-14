@@ -374,70 +374,6 @@ struct flare_t
     bool isVisible;
 };
 
-/**
-* SIM-CORE; Prop = an object mounted on vehicle chassis.
-*/
-struct prop_t
-{
-    prop_t() { memset(this, 0, sizeof(*this)); }
-
-    int noderef;
-    int nodex;
-    int nodey;
-    float offsetx;
-    float offsety;
-    float offsetz;
-    float rotaX;
-    float rotaY;
-    float rotaZ;
-    float orgoffsetX;
-    float orgoffsetY;
-    float orgoffsetZ;
-    Ogre::Quaternion rot;
-    Ogre::SceneNode *scene_node; //!< The pivot scene node (parented to root-node).
-    Ogre::SceneNode *wheel; //!< Special prop: custom steering wheel for dashboard
-    Ogre::Vector3 wheelpos; //!< Special prop: custom steering wheel for dashboard
-    int mirror;             //<! Special prop: rear view mirror {0 = disabled, -1 = right, 1 = left}
-    char beacontype;        //<! Special prop: beacon {0 = none, 'b' = user-specified, 'r' = red, 'p' = police lightbar, 'L'/'R'/'w' - aircraft wings}
-
-    // formerly named "bbs"
-    Ogre::BillboardSet *beacon_flares_billboard_system[4];
-
-    // formerly named bbsnode
-    Ogre::SceneNode *beacon_flare_billboard_scene_node[4];
-
-    // formerly named "light"
-    Ogre::Light *beacon_light[4];
-
-    // formerly named "brate"
-    float beacon_light_rotation_rate[4]; //<! Radians per second
-    
-    // formerly named "bpos"
-    float beacon_light_rotation_angle[4]; //<! Radians
-    
-    float animratio[10]; //!< A coefficient for the animation, prop degree if used with mode: rotation and propoffset if used with mode: offset.
-    int animFlags[10];
-    int animMode[10];
-    float animOpt3[10]; //!< Various purposes
-    float animOpt5[10];
-    int animKey[10];
-    int animKeyState[10];
-    int lastanimKS[10];
-    Ogre::Real wheelrotdegree;
-    int cameramode; //!< Visibility control {-2 = always, -1 = 3rdPerson only, 0+ = cinecam index}
-    MeshObject *mo;
-    MeshObject *wheelmo;
-
-    struct {
-        float lower_limit;  //!< The lower limit for the animation
-        float upper_limit;  //!< The upper limit for the animation
-    } constraints[10];
-
-    int  pp_aero_engine_idx;          //!< Special - a turboprop/pistonprop reference
-    bool pp_aero_propeller_blade:1;   //!< Special - single blade mesh
-    bool pp_aero_propeller_spin:1;    //!< Special - blurred spinning propeller effect
-};
-
 struct exhaust_t
 {
     int emitterNode;
@@ -546,6 +482,7 @@ struct ActorSpawnRequest
     ActorSpawnRequest();
 
     CacheEntry*       asr_cache_entry; //!< Optional, overrides 'asr_filename' and 'asr_cache_entry_num'
+    ProjectEntry*     asr_project;     //!< Optional, load from project folder
     std::string       asr_filename;
     Ogre::String      asr_config;
     Ogre::Vector3     asr_position;

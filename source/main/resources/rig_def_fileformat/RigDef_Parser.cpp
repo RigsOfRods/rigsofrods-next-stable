@@ -45,6 +45,8 @@ using namespace RoR;
 namespace RigDef
 {
 
+using namespace RoR;
+
 inline bool IsWhitespace(char c)
 {
     return (c == ' ') || (c == '\t');
@@ -106,12 +108,23 @@ void Parser::ProcessCurrentLine()
         }
         return;
     }
+    else if (StrEqualsNocase(m_current_line, "comment"))
+    {
+        m_in_block_comment = true;
+        return;
+    }
     else if ((m_current_line[0] == ';') || (m_current_line[0] == '/'))
     {
+        this->ProcessCommentLine();
         return;
     }
 
     this->TokenizeCurrentLine();
+
+    if (m_num_args == 0)
+    {
+        return; // Skip empty line
+    }
 
     // Detect keywords on current line 
     File::Keyword keyword = IdentifyKeywordInCurrentLine();
@@ -192,6 +205,7 @@ void Parser::ProcessCurrentLine()
         case File::KEYWORD_ROTATORS:                 this->ChangeSection(File::SECTION_ROTATORS);         return;
         case File::KEYWORD_ROTATORS2:                this->ChangeSection(File::SECTION_ROTATORS_2);       return;
         case File::KEYWORD_SCREWPROPS:               this->ChangeSection(File::SECTION_SCREWPROPS);       return;
+        case File::KEYWORD_SCRIPTS:                  this->ChangeSection(File::SECTION_SCRIPTS);          return;
         case File::KEYWORD_SECTION:                  this->ProcessChangeModuleLine(keyword);              return;
         case File::KEYWORD_SECTIONCONFIG:            /* Ignored */                                        return;
         case File::KEYWORD_SET_BEAM_DEFAULTS:        this->ParseDirectiveSetBeamDefaults();               return;
@@ -279,6 +293,7 @@ void Parser::ProcessCurrentLine()
         case (File::SECTION_ROTATORS):
         case (File::SECTION_ROTATORS_2):           this->ParseRotatorsUnified();         return;
         case (File::SECTION_SCREWPROPS):           this->ParseScrewprops();              return;
+        case (File::SECTION_SCRIPTS):              this->ParseScripts();                 return;
         case (File::SECTION_SHOCKS):               this->ParseShock();                   return;
         case (File::SECTION_SHOCKS_2):             this->ParseShock2();                  return;
         case (File::SECTION_SHOCKS_3):             this->ParseShock3();                  return;
@@ -2488,6 +2503,41 @@ void Parser::ParseScrewprops()
     m_current_module->screwprops.push_back(screwprop);
 }
 
+void Parser::ParseScripts()
+{
+    if (! this->CheckNumArguments(2)) { return; }
+    
+    Script script;
+
+    std::string type_str(this->GetArgStr(0));
+    if (type_str == "frame-step")
+    {
+        script.type = Script::TYPE_FRAMESTEP;
+    }
+    else if (type_str == "sim-step")
+    {
+        script.type = Script::TYPE_SIMSTEP;
+    }
+    else
+    {
+        this->AddMessage(type_str, Message::TYPE_ERROR, _L("Invalid param #0 (type), ignoring line"));
+        return;
+    }
+
+    script.filename = this->GetArgStr(1);
+
+    for (int i = 2; i < m_num_args; ++i)
+    {
+        if (i > 2)
+        {
+            script.arguments += " ";
+        }
+        script.arguments += this->GetArgStr(i);
+    }
+
+    m_current_module->scripts.push_back(script);
+}
+
 void Parser::ParseRotatorsUnified()
 {
     if (! this->CheckNumArguments(13)) { return; }
@@ -2767,6 +2817,7 @@ void Parser::ParseNodesUnified()
     node.beam_defaults = m_user_beam_defaults;
     node.node_minimass = m_user_minimass;
     node.detacher_group = m_current_detacher_group;
+    node.editor_group_id = (int)m_current_module->node_editor_groups.size() - 1; // Empty -> -1 (none), otherwise last index.
 
     if (m_current_section == File::SECTION_NODES_2)
     {
@@ -3012,6 +3063,7 @@ void Parser::ParseBeams()
     Beam beam;
     beam.defaults       = m_user_beam_defaults;
     beam.detacher_group = m_current_detacher_group;
+    beam.editor_group_id = m_current_module->beam_editor_groups.size() - 1; // Empty -> -1 (none), otherwise last index.
     
     beam.nodes[0] = this->GetArgNodeRef(0);
     beam.nodes[1] = this->GetArgNodeRef(1);
@@ -3023,6 +3075,7 @@ void Parser::ParseBeams()
         for (auto itor = options_str.begin(); itor != options_str.end(); ++itor)
         {
                  if (*itor == 'v') { continue; } // Dummy flag
+            else if (*itor == 'n') { continue; } // Dummy flag
             else if (*itor == 'i') { beam.options |= Beam::OPTION_i_INVISIBLE; }
             else if (*itor == 'r') { beam.options |= Beam::OPTION_r_ROPE; }
             else if (*itor == 's') { beam.options |= Beam::OPTION_s_SUPPORT; }
@@ -3151,7 +3204,7 @@ void Parser::ParseAuthor()
 
     Author author;
     if (m_num_args > 1) { author.type             = this->GetArgStr(1); }
-    if (m_num_args > 2) { author.forum_account_id = this->GetArgInt(2); author._has_forum_account = true; }
+    if (m_num_args > 2) { author.forum_account_id = this->GetArgInt(2); }
     if (m_num_args > 3) { author.name             = this->GetArgStr(3); }
     if (m_num_args > 4) { author.email            = this->GetArgStr(4); }
     m_definition->authors.push_back(author);
@@ -3707,13 +3760,6 @@ void Parser::ProcessRawLine(const char* raw_line_buf)
         ++raw_start;
     }
 
-    // Skip empty/comment lines
-    if ((raw_start == raw_end) || (*raw_start == ';') || (*raw_start == '/'))
-    {
-        ++m_current_line_number;
-        return;
-    }
-
     // Sanitize UTF-8
     memset(m_current_line, 0, LINE_BUFFER_LENGTH);
     char* out_start = m_current_line;
@@ -3722,6 +3768,47 @@ void Parser::ProcessRawLine(const char* raw_line_buf)
     // Process
     this->ProcessCurrentLine();
     ++m_current_line_number;
+}
+
+void Parser::ProcessCommentLine()
+{
+    if (m_current_line[0] != ';')
+    {
+        return;
+    }
+
+    Str<100> name;
+    if ((strlen(m_current_line) >= 5) &&
+        (m_current_line[1] == 'g')    &&
+        (m_current_line[2] == 'r')    &&
+        (m_current_line[3] == 'p')    &&
+        (m_current_line[4] == ':'))
+    {
+        name = &m_current_line[5];
+    }
+    else if (App::diag_import_grp_loose->GetActiveVal<bool>())
+    {
+        name = &m_current_line[1];
+    }
+    else
+    {
+        return;
+    }
+
+    switch (m_current_section)
+    {
+    case File::SECTION_NODES:
+    case File::SECTION_NODES_2:
+        m_current_module->node_editor_groups.push_back(File::EditorGroup(name.ToCStr()));
+        break;
+
+    case File::SECTION_BEAMS:
+        m_current_module->beam_editor_groups.push_back(File::EditorGroup(name.ToCStr()));
+        break;
+
+    default:
+        break;
+    }
 }
 
 } // namespace RigDef

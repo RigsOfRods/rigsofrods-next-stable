@@ -58,6 +58,7 @@
 #include "Renderdash.h"
 #include "RoRFrameListener.h"
 #include "ScrewProp.h"
+#include "ScriptEngine.h"
 #include "Skidmark.h"
 #include "SkinManager.h"
 #include "SlideNode.h"
@@ -792,11 +793,11 @@ void ActorSpawner::BuildAerialEngine(
 
     /* Visuals */
     float scale = GetNode(ref_node_index).RelPosition.distance(GetNode(blade_1_node_index).RelPosition) / 2.25f;
-    for (prop_t& prop: m_props)
+    for (RoR::Prop& prop: m_props)
     {
-        if ((prop.noderef == ref_node_index) && (prop.pp_aero_propeller_blade || prop.pp_aero_propeller_spin))
+        if ((prop.pp_node_ref == ref_node_index) && (prop.pp_aero_propeller_blade || prop.pp_aero_propeller_spin))
         {
-            prop.scene_node->scale(scale, scale, scale);
+            prop.pp_scene_node->scale(scale, scale, scale);
             prop.pp_aero_engine_idx = aeroengine_index;
         }
     }
@@ -959,155 +960,129 @@ void ActorSpawner::ProcessWing(RigDef::Wing & def)
             {
                 //Left green
                 m_airplane_left_light=previous_wing.fa->nfld;
-                prop_t left_green_prop;
+                RoR::Prop left_green_prop;
 
-                left_green_prop.noderef=previous_wing.fa->nfld;
-                left_green_prop.nodex=previous_wing.fa->nflu;
-                left_green_prop.nodey=previous_wing.fa->nfld; //ignored
-                left_green_prop.offsetx=0.5;
-                left_green_prop.offsety=0.0;
-                left_green_prop.offsetz=0.0;
-                left_green_prop.rot=Ogre::Quaternion::IDENTITY;
-                left_green_prop.wheel=nullptr;
-                left_green_prop.wheelrotdegree=0.0;
-                left_green_prop.mirror=0;
-                left_green_prop.scene_node=nullptr; //no visible prop
-                left_green_prop.beacon_light_rotation_angle[0]=0.0;
-                left_green_prop.beacon_light_rotation_rate[0]=1.0;
-                left_green_prop.beacontype='L';
-                left_green_prop.beacon_light[0]=nullptr; //no light
+                left_green_prop.pp_node_ref=previous_wing.fa->nfld;
+                left_green_prop.pp_node_x=previous_wing.fa->nflu;
+                left_green_prop.pp_node_y=previous_wing.fa->nfld; //ignored
+                left_green_prop.pp_offset.x=0.5;
+                left_green_prop.pp_offset.y=0.0;
+                left_green_prop.pp_offset.z=0.0;
+                left_green_prop.pp_beacon_rot_angle[0]=0.0;
+                left_green_prop.pp_beacon_rot_rate[0]=1.0;
+                left_green_prop.pp_beacon_type='L';
+                left_green_prop.pp_beacon_light[0]=nullptr; //no light
                 //the flare billboard
-                left_green_prop.beacon_flare_billboard_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
-                left_green_prop.beacon_flares_billboard_system[0]=gEnv->sceneManager->createBillboardSet(this->ComposeName("Prop", static_cast<int>(m_props.size())+1),1);
-                left_green_prop.beacon_flares_billboard_system[0]->createBillboard(0,0,0);
-                if (left_green_prop.beacon_flares_billboard_system[0])
+                left_green_prop.pp_beacon_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+                left_green_prop.pp_beacon_bbs[0]=gEnv->sceneManager->createBillboardSet(this->ComposeName("Prop", static_cast<int>(m_props.size())+1),1);
+                left_green_prop.pp_beacon_bbs[0]->createBillboard(0,0,0);
+                if (left_green_prop.pp_beacon_bbs[0])
                 {
-                    left_green_prop.beacon_flares_billboard_system[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
-                    left_green_prop.beacon_flares_billboard_system[0]->setMaterialName("tracks/greenflare");
-                    left_green_prop.beacon_flare_billboard_scene_node[0]->attachObject(left_green_prop.beacon_flares_billboard_system[0]);
+                    left_green_prop.pp_beacon_bbs[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
+                    left_green_prop.pp_beacon_bbs[0]->setMaterialName("tracks/greenflare");
+                    left_green_prop.pp_beacon_scene_node[0]->attachObject(left_green_prop.pp_beacon_bbs[0]);
                 }
-                left_green_prop.beacon_flare_billboard_scene_node[0]->setVisible(false);
-                left_green_prop.beacon_flares_billboard_system[0]->setDefaultDimensions(0.5, 0.5);
-                left_green_prop.animFlags[0]=0;
-                left_green_prop.animMode[0]=0;
+                left_green_prop.pp_beacon_scene_node[0]->setVisible(false);
+                left_green_prop.pp_beacon_bbs[0]->setDefaultDimensions(0.5, 0.5);
                 m_props.push_back(left_green_prop);
                 
                 //Left flash
-                prop_t left_flash_prop;
+                RoR::Prop left_flash_prop;
 
-                left_flash_prop.noderef=previous_wing.fa->nbld;
-                left_flash_prop.nodex=previous_wing.fa->nblu;
-                left_flash_prop.nodey=previous_wing.fa->nbld; //ignored
-                left_flash_prop.offsetx=0.5;
-                left_flash_prop.offsety=0.0;
-                left_flash_prop.offsetz=0.0;
-                left_flash_prop.rot=Ogre::Quaternion::IDENTITY;
-                left_flash_prop.wheel=nullptr;
-                left_flash_prop.wheelrotdegree=0.0;
-                left_flash_prop.mirror=0;
-                left_flash_prop.scene_node=nullptr; //no visible prop
-                left_flash_prop.beacon_light_rotation_angle[0]=0.5; //alt
-                left_flash_prop.beacon_light_rotation_rate[0]=1.0;
-                left_flash_prop.beacontype='w';
+                left_flash_prop.pp_node_ref=previous_wing.fa->nbld;
+                left_flash_prop.pp_node_x=previous_wing.fa->nblu;
+                left_flash_prop.pp_node_y=previous_wing.fa->nbld; //ignored
+                left_flash_prop.pp_offset.x=0.5;
+                left_flash_prop.pp_offset.y=0.0;
+                left_flash_prop.pp_offset.z=0.0;
+                left_flash_prop.pp_beacon_rot_angle[0]=0.5; //alt
+                left_flash_prop.pp_beacon_rot_rate[0]=1.0;
+                left_flash_prop.pp_beacon_type='w';
                 //light
                 std::string prop_name = this->ComposeName("Prop", static_cast<int>(m_props.size())+1);
-                left_flash_prop.beacon_light[0]=gEnv->sceneManager->createLight(prop_name);
-                left_flash_prop.beacon_light[0]->setType(Ogre::Light::LT_POINT);
-                left_flash_prop.beacon_light[0]->setDiffuseColour( Ogre::ColourValue(1.0, 1.0, 1.0));
-                left_flash_prop.beacon_light[0]->setSpecularColour( Ogre::ColourValue(1.0, 1.0, 1.0));
-                left_flash_prop.beacon_light[0]->setAttenuation(50.0, 1.0, 0.3, 0.0);
-                left_flash_prop.beacon_light[0]->setCastShadows(false);
-                left_flash_prop.beacon_light[0]->setVisible(false);
+                left_flash_prop.pp_beacon_light[0]=gEnv->sceneManager->createLight(prop_name);
+                left_flash_prop.pp_beacon_light[0]->setType(Ogre::Light::LT_POINT);
+                left_flash_prop.pp_beacon_light[0]->setDiffuseColour( Ogre::ColourValue(1.0, 1.0, 1.0));
+                left_flash_prop.pp_beacon_light[0]->setSpecularColour( Ogre::ColourValue(1.0, 1.0, 1.0));
+                left_flash_prop.pp_beacon_light[0]->setAttenuation(50.0, 1.0, 0.3, 0.0);
+                left_flash_prop.pp_beacon_light[0]->setCastShadows(false);
+                left_flash_prop.pp_beacon_light[0]->setVisible(false);
                 //the flare billboard
-                left_flash_prop.beacon_flare_billboard_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
-                left_flash_prop.beacon_flares_billboard_system[0]=gEnv->sceneManager->createBillboardSet(prop_name,1);
-                left_flash_prop.beacon_flares_billboard_system[0]->createBillboard(0,0,0);
-                if (left_flash_prop.beacon_flares_billboard_system[0])
+                left_flash_prop.pp_beacon_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+                left_flash_prop.pp_beacon_bbs[0]=gEnv->sceneManager->createBillboardSet(prop_name,1);
+                left_flash_prop.pp_beacon_bbs[0]->createBillboard(0,0,0);
+                if (left_flash_prop.pp_beacon_bbs[0])
                 {
-                    left_flash_prop.beacon_flares_billboard_system[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
-                    left_flash_prop.beacon_flares_billboard_system[0]->setMaterialName("tracks/flare");
-                    left_flash_prop.beacon_flare_billboard_scene_node[0]->attachObject(left_flash_prop.beacon_flares_billboard_system[0]);
+                    left_flash_prop.pp_beacon_bbs[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
+                    left_flash_prop.pp_beacon_bbs[0]->setMaterialName("tracks/flare");
+                    left_flash_prop.pp_beacon_scene_node[0]->attachObject(left_flash_prop.pp_beacon_bbs[0]);
                 }
-                left_flash_prop.beacon_flare_billboard_scene_node[0]->setVisible(false);
-                left_flash_prop.beacon_flares_billboard_system[0]->setDefaultDimensions(1.0, 1.0);
+                left_flash_prop.pp_beacon_scene_node[0]->setVisible(false);
+                left_flash_prop.pp_beacon_bbs[0]->setDefaultDimensions(1.0, 1.0);
                 m_props.push_back(left_flash_prop);
                 
                 //Right red
                 m_airplane_right_light=previous_wing.fa->nfrd;
-                prop_t right_red_prop;
+                RoR::Prop right_red_prop;
 
                 
-                right_red_prop.noderef=start_wing.fa->nfrd;
-                right_red_prop.nodex=start_wing.fa->nfru;
-                right_red_prop.nodey=start_wing.fa->nfrd; //ignored
-                right_red_prop.offsetx=0.5;
-                right_red_prop.offsety=0.0;
-                right_red_prop.offsetz=0.0;
-                right_red_prop.rot=Ogre::Quaternion::IDENTITY;
-                right_red_prop.wheel=nullptr;
-                right_red_prop.wheelrotdegree=0.0;
-                right_red_prop.mirror=0;
-                right_red_prop.scene_node=nullptr; //no visible prop
-                right_red_prop.beacon_light_rotation_angle[0]=0.0;
-                right_red_prop.beacon_light_rotation_rate[0]=1.0;
-                right_red_prop.beacontype='R';
-                right_red_prop.beacon_light[0]=nullptr; /* No light */
+                right_red_prop.pp_node_ref=start_wing.fa->nfrd;
+                right_red_prop.pp_node_x=start_wing.fa->nfru;
+                right_red_prop.pp_node_y=start_wing.fa->nfrd; //ignored
+                right_red_prop.pp_offset.x=0.5;
+                right_red_prop.pp_offset.y=0.0;
+                right_red_prop.pp_offset.z=0.0;
+                right_red_prop.pp_beacon_rot_angle[0]=0.0;
+                right_red_prop.pp_beacon_rot_rate[0]=1.0;
+                right_red_prop.pp_beacon_type='R';
+                right_red_prop.pp_beacon_light[0]=nullptr; /* No light */
                 //the flare billboard
-                right_red_prop.beacon_flare_billboard_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
-                right_red_prop.beacon_flares_billboard_system[0]=gEnv->sceneManager->createBillboardSet(this->ComposeName("Prop", static_cast<int>(m_props.size())+1),1);
-                right_red_prop.beacon_flares_billboard_system[0]->createBillboard(0,0,0);
-                if (right_red_prop.beacon_flares_billboard_system[0])
+                right_red_prop.pp_beacon_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+                right_red_prop.pp_beacon_bbs[0]=gEnv->sceneManager->createBillboardSet(this->ComposeName("Prop", static_cast<int>(m_props.size())+1),1);
+                right_red_prop.pp_beacon_bbs[0]->createBillboard(0,0,0);
+                if (right_red_prop.pp_beacon_bbs[0])
                 {
-                    right_red_prop.beacon_flares_billboard_system[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
-                    right_red_prop.beacon_flares_billboard_system[0]->setMaterialName("tracks/redflare");
-                    right_red_prop.beacon_flare_billboard_scene_node[0]->attachObject(right_red_prop.beacon_flares_billboard_system[0]);
+                    right_red_prop.pp_beacon_bbs[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
+                    right_red_prop.pp_beacon_bbs[0]->setMaterialName("tracks/redflare");
+                    right_red_prop.pp_beacon_scene_node[0]->attachObject(right_red_prop.pp_beacon_bbs[0]);
                 }
-                right_red_prop.beacon_flare_billboard_scene_node[0]->setVisible(false);
-                right_red_prop.beacon_flares_billboard_system[0]->setDefaultDimensions(0.5, 0.5);
-                right_red_prop.animFlags[0]=0;
-                right_red_prop.animMode[0]=0;
+                right_red_prop.pp_beacon_scene_node[0]->setVisible(false);
+                right_red_prop.pp_beacon_bbs[0]->setDefaultDimensions(0.5, 0.5);
                 m_props.push_back(right_red_prop);
                 
                 //Right flash
-                prop_t right_flash_prop;
+                RoR::Prop right_flash_prop;
 
-                right_flash_prop.noderef=start_wing.fa->nbrd;
-                right_flash_prop.nodex=start_wing.fa->nbru;
-                right_flash_prop.nodey=start_wing.fa->nbrd; //ignored
-                right_flash_prop.offsetx=0.5;
-                right_flash_prop.offsety=0.0;
-                right_flash_prop.offsetz=0.0;
-                right_flash_prop.rot=Ogre::Quaternion::IDENTITY;
-                right_flash_prop.wheel=nullptr;
-                right_flash_prop.wheelrotdegree=0.0;
-                right_flash_prop.mirror=0;
-                right_flash_prop.scene_node=nullptr; //no visible prop
-                right_flash_prop.beacon_light_rotation_angle[0]=0.5; //alt
-                right_flash_prop.beacon_light_rotation_rate[0]=1.0;
-                right_flash_prop.beacontype='w';
+                right_flash_prop.pp_node_ref=start_wing.fa->nbrd;
+                right_flash_prop.pp_node_x=start_wing.fa->nbru;
+                right_flash_prop.pp_node_y=start_wing.fa->nbrd; //ignored
+                right_flash_prop.pp_offset.x=0.5;
+                right_flash_prop.pp_offset.y=0.0;
+                right_flash_prop.pp_offset.z=0.0;
+                right_flash_prop.pp_beacon_rot_angle[0]=0.5; //alt
+                right_flash_prop.pp_beacon_rot_rate[0]=1.0;
+                right_flash_prop.pp_beacon_type='w';
                 //light
                 prop_name = this->ComposeName("Prop", static_cast<int>(m_props.size())+1);
-                right_flash_prop.beacon_light[0]=gEnv->sceneManager->createLight(prop_name);
-                right_flash_prop.beacon_light[0]->setType(Ogre::Light::LT_POINT);
-                right_flash_prop.beacon_light[0]->setDiffuseColour( Ogre::ColourValue(1.0, 1.0, 1.0));
-                right_flash_prop.beacon_light[0]->setSpecularColour( Ogre::ColourValue(1.0, 1.0, 1.0));
-                right_flash_prop.beacon_light[0]->setAttenuation(50.0, 1.0, 0.3, 0.0);
-                right_flash_prop.beacon_light[0]->setCastShadows(false);
-                right_flash_prop.beacon_light[0]->setVisible(false);
+                right_flash_prop.pp_beacon_light[0]=gEnv->sceneManager->createLight(prop_name);
+                right_flash_prop.pp_beacon_light[0]->setType(Ogre::Light::LT_POINT);
+                right_flash_prop.pp_beacon_light[0]->setDiffuseColour( Ogre::ColourValue(1.0, 1.0, 1.0));
+                right_flash_prop.pp_beacon_light[0]->setSpecularColour( Ogre::ColourValue(1.0, 1.0, 1.0));
+                right_flash_prop.pp_beacon_light[0]->setAttenuation(50.0, 1.0, 0.3, 0.0);
+                right_flash_prop.pp_beacon_light[0]->setCastShadows(false);
+                right_flash_prop.pp_beacon_light[0]->setVisible(false);
                 //the flare billboard
-                right_flash_prop.beacon_flare_billboard_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
-                right_flash_prop.beacon_flares_billboard_system[0]=gEnv->sceneManager->createBillboardSet(prop_name,1);
-                right_flash_prop.beacon_flares_billboard_system[0]->createBillboard(0,0,0);
-                if (right_flash_prop.beacon_flares_billboard_system[0] != nullptr)
+                right_flash_prop.pp_beacon_scene_node[0] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+                right_flash_prop.pp_beacon_bbs[0]=gEnv->sceneManager->createBillboardSet(prop_name,1);
+                right_flash_prop.pp_beacon_bbs[0]->createBillboard(0,0,0);
+                if (right_flash_prop.pp_beacon_bbs[0] != nullptr)
                 {
-                    right_flash_prop.beacon_flares_billboard_system[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
-                    right_flash_prop.beacon_flares_billboard_system[0]->setMaterialName("tracks/flare");
-                    right_flash_prop.beacon_flare_billboard_scene_node[0]->attachObject(right_flash_prop.beacon_flares_billboard_system[0]);
+                    right_flash_prop.pp_beacon_bbs[0]->setVisibilityFlags(DEPTHMAP_DISABLED);
+                    right_flash_prop.pp_beacon_bbs[0]->setMaterialName("tracks/flare");
+                    right_flash_prop.pp_beacon_scene_node[0]->attachObject(right_flash_prop.pp_beacon_bbs[0]);
                 }
-                right_flash_prop.beacon_flare_billboard_scene_node[0]->setVisible(false);
-                right_flash_prop.beacon_flares_billboard_system[0]->setDefaultDimensions(1.0, 1.0);
-                right_flash_prop.animFlags[0]=0;
-                right_flash_prop.animMode[0]=0;
+                right_flash_prop.pp_beacon_scene_node[0]->setVisible(false);
+                right_flash_prop.pp_beacon_bbs[0]->setDefaultDimensions(1.0, 1.0);
                 m_props.push_back(right_flash_prop);
                 
                 m_generate_wing_position_lights = false; // Already done
@@ -1282,7 +1257,7 @@ void ActorSpawner::ProcessExhaust(RigDef::Exhaust & def)
     exhaust.smokeNode->setPosition(this->GetNode(exhaust.emitterNode).AbsPosition);
 
     // Update GFX for nodes
-    for (GfxActor::NodeGfx& nfx : m_gfx_nodes)
+    for (NodeGfx& nfx : m_gfx_nodes)
     {
         if (nfx.nx_node_idx == exhaust.emitterNode || nfx.nx_node_idx == exhaust.directionNode)
         {
@@ -1549,48 +1524,36 @@ void ActorSpawner::ProcessFlexbody(std::shared_ptr<RigDef::Flexbody> def)
 
 void ActorSpawner::ProcessProp(RigDef::Prop & def)
 {
-    prop_t prop;
+    RoR::Prop prop;
     int prop_index = static_cast<int>(m_props.size());
-    memset(&prop, 0, sizeof(prop_t));
 
-    prop.noderef         = GetNodeIndexOrThrow(def.reference_node);
-    prop.nodex           = FindNodeIndex(def.x_axis_node);
-    prop.nodey           = FindNodeIndex(def.y_axis_node);
-    if (prop.nodex == -1 || prop.nodey == -1)
+    prop.pp_node_ref         = GetNodeIndexOrThrow(def.reference_node);
+    prop.pp_node_x           = FindNodeIndex(def.x_axis_node);
+    prop.pp_node_y           = FindNodeIndex(def.y_axis_node);
+    if (prop.pp_node_x == node_t::INVALID_IDX || prop.pp_node_y == node_t::INVALID_IDX)
     {
-        return;
+        return; // Error alredy logged by `FindNodeIndex()`
     }
-    prop.offsetx         = def.offset.x;
-    prop.offsety         = def.offset.y;
-    prop.offsetz         = def.offset.z;
-    prop.orgoffsetX      = def.offset.x;
-    prop.orgoffsetY      = def.offset.y;
-    prop.orgoffsetZ      = def.offset.z;
-    prop.rotaX           = def.rotation.x;
-    prop.rotaY           = def.rotation.y;
-    prop.rotaZ           = def.rotation.z;
-    prop.rot             = Ogre::Quaternion(Ogre::Degree(def.rotation.z), Ogre::Vector3::UNIT_Z);
-    prop.rot             = prop.rot * Ogre::Quaternion(Ogre::Degree(def.rotation.y), Ogre::Vector3::UNIT_Y);
-    prop.rot             = prop.rot * Ogre::Quaternion(Ogre::Degree(def.rotation.x), Ogre::Vector3::UNIT_X);
-    prop.cameramode      = def.camera_settings.mode; /* Handles default value */
-    prop.wheelrotdegree  = 160.f;
-    /* Set no animation by default */
-    prop.animKey[0]      = -1;
-    prop.animKeyState[0] = -1.f;
+    prop.pp_offset       = def.offset;
+    prop.pp_offset_orig  = def.offset;
+    prop.pp_rot          = Ogre::Quaternion(Ogre::Degree(def.rotation.z), Ogre::Vector3::UNIT_Z)
+                           * Ogre::Quaternion(Ogre::Degree(def.rotation.y), Ogre::Vector3::UNIT_Y)
+                           * Ogre::Quaternion(Ogre::Degree(def.rotation.x), Ogre::Vector3::UNIT_X);
+    prop.pp_rota         = def.rotation;
+    prop.pp_camera_mode      = def.camera_settings.mode; /* Handles default value */
+    prop.pp_wheel_rot_degree  = 160.f; // ??
 
     /* SPECIAL PROPS */
 
     /* Rear view mirror (left) */
     if (def.special == RigDef::Prop::SPECIAL_MIRROR_LEFT)
     {
-        prop.mirror = 1;
         m_curr_mirror_prop_type = CustomMaterial::MirrorPropType::MPROP_LEFT;
     }
 
     /* Rear view mirror (right) */
     if (def.special == RigDef::Prop::SPECIAL_MIRROR_RIGHT)
     {
-        prop.mirror = -1;
         m_curr_mirror_prop_type = CustomMaterial::MirrorPropType::MPROP_RIGHT;
     }
 
@@ -1610,32 +1573,31 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
         {
             steering_wheel_offset = def.special_prop_dashboard.offset;
         }
-        prop.wheelrotdegree = def.special_prop_dashboard.rotation_angle;
-        prop.wheel = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
-        prop.wheelpos = steering_wheel_offset;
+        prop.pp_wheel_rot_degree = def.special_prop_dashboard.rotation_angle;
+        prop.pp_wheel_scene_node = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+        prop.pp_wheel_pos = steering_wheel_offset;
         const std::string instance_name = this->ComposeName("SteeringWheelPropEntity", prop_index);
-        prop.wheelmo = new MeshObject(
+        prop.pp_wheel_mesh_obj = new MeshObject(
             def.special_prop_dashboard.mesh_name,
             m_custom_resource_group,
             instance_name,
-            prop.wheel
+            prop.pp_wheel_scene_node
             );
-        this->SetupNewEntity(prop.wheelmo->getEntity(), Ogre::ColourValue(0, 0.5, 0.5));
+        this->SetupNewEntity(prop.pp_wheel_mesh_obj->getEntity(), Ogre::ColourValue(0, 0.5, 0.5));
     }
 
     /* CREATE THE PROP */
 
-    prop.scene_node = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+    prop.pp_scene_node = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
     const std::string instance_name = this->ComposeName("PropEntity", prop_index);
-    prop.mo = new MeshObject(def.mesh_name, m_custom_resource_group, instance_name, prop.scene_node);
-    prop.mo->setCastShadows(true); // Orig code {{ prop.mo->setCastShadows(shadowmode != 0); }}, shadowmode has default value 1 and changes with undocumented directive 'set_shadows'
-    prop.beacontype = 'n'; // Orig: hardcoded in BTS_PROPS
+    prop.pp_mesh_obj = new MeshObject(def.mesh_name, m_custom_resource_group, instance_name, prop.pp_scene_node);
+    prop.pp_mesh_obj->setCastShadows(true); // Orig code {{ prop.pp_mesh_obj->setCastShadows(shadowmode != 0); }}, shadowmode has default value 1 and changes with undocumented directive 'set_shadows'
 
     if (def.special == RigDef::Prop::SPECIAL_AERO_PROP_SPIN)
     {
         prop.pp_aero_propeller_spin = true;
-        prop.mo->setCastShadows(false);
-        prop.scene_node->setVisible(false);
+        prop.pp_mesh_obj->setCastShadows(false);
+        prop.pp_scene_node->setVisible(false);
     }
     else if(def.special == RigDef::Prop::SPECIAL_AERO_PROP_BLADE)
     {
@@ -1647,7 +1609,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
         if (m_driverseat_prop_index == -1)
         {
             m_driverseat_prop_index = prop_index;
-            prop.mo->setMaterialName("driversseat");
+            prop.pp_mesh_obj->setMaterialName("driversseat");
         }
         else
         {
@@ -1670,18 +1632,18 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
     {
         if(def.special == RigDef::Prop::SPECIAL_BEACON)
         {
-            prop.beacontype = 'b';
-            prop.beacon_light_rotation_angle[0] = 2.0 * 3.14 * frand();
-            prop.beacon_light_rotation_rate[0] = 4.0 * 3.14 + frand() - 0.5;
+            prop.pp_beacon_type = 'b';
+            prop.pp_beacon_rot_angle[0] = 2.0 * 3.14 * frand();
+            prop.pp_beacon_rot_rate[0] = 4.0 * 3.14 + frand() - 0.5;
             /* the light */
-            auto beacon_light = gEnv->sceneManager->createLight();
-            beacon_light->setType(Ogre::Light::LT_SPOTLIGHT);
-            beacon_light->setDiffuseColour(def.special_prop_beacon.color);
-            beacon_light->setSpecularColour(def.special_prop_beacon.color);
-            beacon_light->setAttenuation(50.0, 1.0, 0.3, 0.0);
-            beacon_light->setSpotlightRange( Ogre::Degree(35), Ogre::Degree(45) );
-            beacon_light->setCastShadows(false);
-            beacon_light->setVisible(false);
+            auto pp_beacon_light = gEnv->sceneManager->createLight();
+            pp_beacon_light->setType(Ogre::Light::LT_SPOTLIGHT);
+            pp_beacon_light->setDiffuseColour(def.special_prop_beacon.color);
+            pp_beacon_light->setSpecularColour(def.special_prop_beacon.color);
+            pp_beacon_light->setAttenuation(50.0, 1.0, 0.3, 0.0);
+            pp_beacon_light->setSpotlightRange( Ogre::Degree(35), Ogre::Degree(45) );
+            pp_beacon_light->setCastShadows(false);
+            pp_beacon_light->setVisible(false);
             /* the flare billboard */
             auto flare_scene_node = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
             auto flare_billboard_sys = gEnv->sceneManager->createBillboardSet(1); //(propname,1);
@@ -1695,23 +1657,23 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             flare_scene_node->setVisible(false);
 
             // Complete
-            prop.beacon_flare_billboard_scene_node[0] = flare_scene_node;
-            prop.beacon_flares_billboard_system[0] = flare_billboard_sys;
-            prop.beacon_light[0] = beacon_light;
+            prop.pp_beacon_scene_node[0] = flare_scene_node;
+            prop.pp_beacon_bbs[0] = flare_billboard_sys;
+            prop.pp_beacon_light[0] = pp_beacon_light;
         }
         else if(def.special == RigDef::Prop::SPECIAL_REDBEACON)
         {
-            prop.beacon_light_rotation_angle[0] = 0.f;
-            prop.beacon_light_rotation_rate[0] = 1.0;
-            prop.beacontype = 'r';
+            prop.pp_beacon_rot_angle[0] = 0.f;
+            prop.pp_beacon_rot_rate[0] = 1.0;
+            prop.pp_beacon_type = 'r';
             //the light
-            auto beacon_light=gEnv->sceneManager->createLight();//propname);
-            beacon_light->setType(Ogre::Light::LT_POINT);
-            beacon_light->setDiffuseColour( Ogre::ColourValue(1.0, 0.0, 0.0));
-            beacon_light->setSpecularColour( Ogre::ColourValue(1.0, 0.0, 0.0));
-            beacon_light->setAttenuation(50.0, 1.0, 0.3, 0.0);
-            beacon_light->setCastShadows(false);
-            beacon_light->setVisible(false);
+            auto pp_beacon_light=gEnv->sceneManager->createLight();//propname);
+            pp_beacon_light->setType(Ogre::Light::LT_POINT);
+            pp_beacon_light->setDiffuseColour( Ogre::ColourValue(1.0, 0.0, 0.0));
+            pp_beacon_light->setSpecularColour( Ogre::ColourValue(1.0, 0.0, 0.0));
+            pp_beacon_light->setAttenuation(50.0, 1.0, 0.3, 0.0);
+            pp_beacon_light->setCastShadows(false);
+            pp_beacon_light->setVisible(false);
             //the flare billboard
             auto flare_scene_node = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
             auto flare_billboard_sys = gEnv->sceneManager->createBillboardSet(1); //propname,1);
@@ -1726,88 +1688,80 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             flare_scene_node->setVisible(false);
 
             // Finalize
-            prop.beacon_light[0] = beacon_light;
-            prop.beacon_flare_billboard_scene_node[0] = flare_scene_node;
-            prop.beacon_flares_billboard_system[0] = flare_billboard_sys;
+            prop.pp_beacon_light[0] = pp_beacon_light;
+            prop.pp_beacon_scene_node[0] = flare_scene_node;
+            prop.pp_beacon_bbs[0] = flare_billboard_sys;
             
         }
         else if(def.special == RigDef::Prop::SPECIAL_LIGHTBAR)
         {
             m_actor->ar_is_police = true;
-            prop.beacontype='p';
+            prop.pp_beacon_type='p';
             for (int k=0; k<4; k++)
             {
-                prop.beacon_light_rotation_angle[k] = 2.0 * 3.14 * frand();
-                prop.beacon_light_rotation_rate[k] = 4.0 * 3.14 + frand() - 0.5;
-                prop.beacon_flares_billboard_system[k] = nullptr;
+                prop.pp_beacon_rot_angle[k] = 2.0 * 3.14 * frand();
+                prop.pp_beacon_rot_rate[k] = 4.0 * 3.14 + frand() - 0.5;
+                prop.pp_beacon_bbs[k] = nullptr;
                 //the light
-                prop.beacon_light[k]=gEnv->sceneManager->createLight();
-                prop.beacon_light[k]->setType(Ogre::Light::LT_SPOTLIGHT);
+                prop.pp_beacon_light[k]=gEnv->sceneManager->createLight();
+                prop.pp_beacon_light[k]->setType(Ogre::Light::LT_SPOTLIGHT);
                 if (k>1)
                 {
-                    prop.beacon_light[k]->setDiffuseColour( Ogre::ColourValue(1.0, 0.0, 0.0));
-                    prop.beacon_light[k]->setSpecularColour( Ogre::ColourValue(1.0, 0.0, 0.0));
+                    prop.pp_beacon_light[k]->setDiffuseColour( Ogre::ColourValue(1.0, 0.0, 0.0));
+                    prop.pp_beacon_light[k]->setSpecularColour( Ogre::ColourValue(1.0, 0.0, 0.0));
                 }
                 else
                 {
-                    prop.beacon_light[k]->setDiffuseColour( Ogre::ColourValue(0.0, 0.5, 1.0));
-                    prop.beacon_light[k]->setSpecularColour( Ogre::ColourValue(0.0, 0.5, 1.0));
+                    prop.pp_beacon_light[k]->setDiffuseColour( Ogre::ColourValue(0.0, 0.5, 1.0));
+                    prop.pp_beacon_light[k]->setSpecularColour( Ogre::ColourValue(0.0, 0.5, 1.0));
                 }
-                prop.beacon_light[k]->setAttenuation(50.0, 1.0, 0.3, 0.0);
-                prop.beacon_light[k]->setSpotlightRange( Ogre::Degree(35), Ogre::Degree(45) );
-                prop.beacon_light[k]->setCastShadows(false);
-                prop.beacon_light[k]->setVisible(false);
+                prop.pp_beacon_light[k]->setAttenuation(50.0, 1.0, 0.3, 0.0);
+                prop.pp_beacon_light[k]->setSpotlightRange( Ogre::Degree(35), Ogre::Degree(45) );
+                prop.pp_beacon_light[k]->setCastShadows(false);
+                prop.pp_beacon_light[k]->setVisible(false);
                 //the flare billboard
-                prop.beacon_flare_billboard_scene_node[k] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
-                prop.beacon_flares_billboard_system[k]=gEnv->sceneManager->createBillboardSet(1);
-                prop.beacon_flares_billboard_system[k]->createBillboard(0,0,0);
-                if (prop.beacon_flares_billboard_system[k])
+                prop.pp_beacon_scene_node[k] = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
+                prop.pp_beacon_bbs[k]=gEnv->sceneManager->createBillboardSet(1);
+                prop.pp_beacon_bbs[k]->createBillboard(0,0,0);
+                if (prop.pp_beacon_bbs[k])
                 {
                     if (k>1)
                     {
-                        prop.beacon_flares_billboard_system[k]->setMaterialName("tracks/brightredflare");
+                        prop.pp_beacon_bbs[k]->setMaterialName("tracks/brightredflare");
                     }
                     else
                     {
-                        prop.beacon_flares_billboard_system[k]->setMaterialName("tracks/brightblueflare");
+                        prop.pp_beacon_bbs[k]->setMaterialName("tracks/brightblueflare");
                     }
 
-                    prop.beacon_flares_billboard_system[k]->setVisibilityFlags(DEPTHMAP_DISABLED);
-                    prop.beacon_flare_billboard_scene_node[k]->attachObject(prop.beacon_flares_billboard_system[k]);
+                    prop.pp_beacon_bbs[k]->setVisibilityFlags(DEPTHMAP_DISABLED);
+                    prop.pp_beacon_scene_node[k]->attachObject(prop.pp_beacon_bbs[k]);
                 }
-                prop.beacon_flare_billboard_scene_node[k]->setVisible(false);
+                prop.pp_beacon_scene_node[k]->setVisible(false);
             }
         }
 
         if (m_curr_mirror_prop_type != CustomMaterial::MirrorPropType::MPROP_NONE)
         {
-            m_curr_mirror_prop_scenenode = prop.mo->GetSceneNode();
+            m_curr_mirror_prop_scenenode = prop.pp_mesh_obj->GetSceneNode();
         }
     }
 
-    this->SetupNewEntity(prop.mo->getEntity(), Ogre::ColourValue(1.f, 1.f, 0.f));
+    this->SetupNewEntity(prop.pp_mesh_obj->getEntity(), Ogre::ColourValue(1.f, 1.f, 0.f));
 
     m_curr_mirror_prop_scenenode = nullptr;
     m_curr_mirror_prop_type = CustomMaterial::MirrorPropType::MPROP_NONE;
 
     /* PROCESS ANIMATIONS */
 
-    if (def.animations.size() > 10)
+    for (RigDef::Animation& anim_def: def.animations)
     {
-        std::stringstream msg;
-        msg << "Prop (mesh: " << def.mesh_name << ") has too many animations: " << def.animations.size() << " (max. is 10). Using first 10 ...";
-        AddMessage(Message::TYPE_WARNING, msg.str());
-    }
-
-    std::list<RigDef::Animation>::iterator anim_itor = def.animations.begin();
-    int anim_index = 0;
-    while (anim_itor != def.animations.end() && anim_index < 10)
-    {
-        prop.animKeyState[anim_index] = -1.0f; // Orig: hardcoded in {add_animation}
+        PropAnim anim;
+        anim.animKeyState = -1.0f; // Orig: hardcoded in {add_animation}
 
         /* Arg #1: ratio */
-        prop.animratio[anim_index] = anim_itor->ratio;
-        if (anim_itor->ratio == 0) 
+        anim.animratio = anim_def.ratio;
+        if (anim_def.ratio == 0)
         {
             std::stringstream msg;
             msg << "Prop (mesh: " << def.mesh_name << ") has invalid animation ratio (0), using it anyway (compatibility)...";
@@ -1815,238 +1769,235 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
         }
 
         /* Arg #2: option1 (lower limit) */
-        prop.constraints[anim_index].lower_limit = anim_itor->lower_limit; /* Handles default */
+        anim.lower_limit = anim_def.lower_limit; /* Handles default */
 
         /* Arg #3: option2 (upper limit) */
-        prop.constraints[anim_index].upper_limit = anim_itor->upper_limit; /* Handles default */
+        anim.upper_limit = anim_def.upper_limit; /* Handles default */
 
         /* Arg #4: source */
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_AIRSPEED)) { /* (NOTE: code formatting relaxed) */
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AIRSPEED);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AIRSPEED)) { /* (NOTE: code formatting relaxed) */
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AIRSPEED);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_VERTICAL_VELOCITY)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_VVI);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_VERTICAL_VELOCITY)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_VVI);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ALTIMETER_100K)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ALTIMETER);
-            prop.animOpt3[anim_index] = 1.f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ALTIMETER_100K)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ALTIMETER);
+            anim.animOpt3 = 1.f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ALTIMETER_10K)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ALTIMETER);
-            prop.animOpt3[anim_index] = 2.f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ALTIMETER_10K)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ALTIMETER);
+            anim.animOpt3 = 2.f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ALTIMETER_1K)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ALTIMETER);
-            prop.animOpt3[anim_index] = 3.f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ALTIMETER_1K)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ALTIMETER);
+            anim.animOpt3 = 3.f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ANGLE_OF_ATTACK)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AOA);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ANGLE_OF_ATTACK)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AOA);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_FLAP)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_FLAP);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_FLAP)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_FLAP);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_AIR_BRAKE)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AIRBRAKE);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AIR_BRAKE)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AIRBRAKE);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ROLL)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ROLL);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ROLL)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ROLL);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_PITCH)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_PITCH);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_PITCH)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_PITCH);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_BRAKES)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_BRAKE);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_BRAKES)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_BRAKE);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ACCEL)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ACCEL);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ACCEL)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ACCEL);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_CLUTCH)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_CLUTCH);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_CLUTCH)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_CLUTCH);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_SPEEDO)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_SPEEDO);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SPEEDO)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SPEEDO);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_TACHO)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_TACHO);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_TACHO)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_TACHO);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_TURBO)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_TURBO);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_TURBO)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_TURBO);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_PARKING)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_PBRAKE);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_PARKING)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_PBRAKE);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_SHIFT_LEFT_RIGHT)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_SHIFTER);
-            prop.animOpt3[anim_index] = 1.0f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SHIFT_LEFT_RIGHT)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
+            anim.animOpt3 = 1.0f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_SHIFT_BACK_FORTH)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_SHIFTER);
-            prop.animOpt3[anim_index] = 2.0f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SHIFT_BACK_FORTH)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
+            anim.animOpt3 = 2.0f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_SEQUENTIAL_SHIFT)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_SHIFTER);
-            prop.animOpt3[anim_index] = 3.0f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SEQUENTIAL_SHIFT)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
+            anim.animOpt3 = 3.0f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_SHIFTERLIN)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_SHIFTER);
-            prop.animOpt3[anim_index] = 4.0f;
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SHIFTERLIN)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
+            anim.animOpt3 = 4.0f;
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_TORQUE)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_TORQUE);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_TORQUE)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_TORQUE);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_HEADING)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_HEADING);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_HEADING)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_HEADING);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_DIFFLOCK)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_DIFFLOCK);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_DIFFLOCK)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_DIFFLOCK);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_STEERING_WHEEL)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_STEERING);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_STEERING_WHEEL)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_STEERING);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_AILERON)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AILERONS);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AILERON)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AILERONS);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_ELEVATOR)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ELEVATORS);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ELEVATOR)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ELEVATORS);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_AIR_RUDDER)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_ARUDDER);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AIR_RUDDER)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ARUDDER);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_BOAT_RUDDER)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_BRUDDER);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_BOAT_RUDDER)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_BRUDDER);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_BOAT_THROTTLE)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_BTHROTTLE);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_BOAT_THROTTLE)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_BTHROTTLE);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_PERMANENT)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_PERMANENT);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_PERMANENT)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_PERMANENT);
         }
-        if (BITMASK_IS_1(anim_itor->source, RigDef::Animation::SOURCE_EVENT)) {
-            BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_EVENT);
+        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_EVENT)) {
+            BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_EVENT);
         }
         /* Motor-indexed sources */
-        std::list<RigDef::Animation::MotorSource>::iterator source_itor = anim_itor->motor_sources.begin();
-        for ( ; source_itor != anim_itor->motor_sources.end(); source_itor++)
+        std::list<RigDef::Animation::MotorSource>::iterator source_itor = anim_def.motor_sources.begin();
+        for ( ; source_itor != anim_def.motor_sources.end(); source_itor++)
         {
             if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_THROTTLE)) {
-                BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_THROTTLE);
-                prop.animOpt3[anim_index] = static_cast<float>(source_itor->motor);
+                BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_THROTTLE);
+                anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
             if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_RPM)) {
-                BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_RPM);
-                prop.animOpt3[anim_index] = static_cast<float>(source_itor->motor);
+                BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_RPM);
+                anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
             if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_TORQUE)) {
-                BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AETORQUE);
-                prop.animOpt3[anim_index] = static_cast<float>(source_itor->motor);
+                BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AETORQUE);
+                anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
             if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_PITCH)) {
-                BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AEPITCH);
-                prop.animOpt3[anim_index] = static_cast<float>(source_itor->motor);
+                BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AEPITCH);
+                anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
             if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_STATUS)) {
-                BITMASK_SET_1(prop.animFlags[anim_index], ANIM_FLAG_AESTATUS);
-                prop.animOpt3[anim_index] = static_cast<float>(source_itor->motor);
+                BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AESTATUS);
+                anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
         }
-        if (prop.animFlags[anim_index] == 0)
+        if (anim.animFlags == 0)
         {
             AddMessage(Message::TYPE_ERROR, "Failed to identify animation source");
         }
 
         /* Anim modes */
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_ROTATION_X)) {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_ROTA_X);
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_X)) {
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_ROTA_X);
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_ROTATION_Y)) {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_ROTA_Y);
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Y)) {
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_ROTA_Y);
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_ROTATION_Z)) {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_ROTA_Z);
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Z)) {
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_ROTA_Z);
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_OFFSET_X)) {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_OFFSET_X);
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_X)) {
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_OFFSET_X);
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_OFFSET_Y)) {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_OFFSET_Y);
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Y)) {
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_OFFSET_Y);
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_OFFSET_Z)) {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_OFFSET_Z);
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Z)) {
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_OFFSET_Z);
         }
-        if (prop.animMode[anim_index] == 0)
+        if (anim.animMode == 0)
         {
             AddMessage(Message::TYPE_ERROR, "Failed to identify animation mode");
         }
 
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_AUTO_ANIMATE)) 
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_AUTO_ANIMATE)) 
         {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_AUTOANIMATE);
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_AUTOANIMATE);
 
             // Flag whether default lower and/or upper animation limit constraints are effective
-            const bool use_default_lower_limit = (anim_itor->lower_limit == 0.f);
-            const bool use_default_upper_limit = (anim_itor->upper_limit == 0.f);
+            const bool use_default_lower_limit = (anim_def.lower_limit == 0.f);
+            const bool use_default_upper_limit = (anim_def.upper_limit == 0.f);
 
-            if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_ROTATION_X)) {
-                prop.constraints[anim_index].lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_itor->lower_limit + prop.rotaX);
-                prop.constraints[anim_index].upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_itor->upper_limit + prop.rotaX);
+            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_X)) {
+                anim.lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_def.lower_limit + prop.pp_rota.x);
+                anim.upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_def.upper_limit + prop.pp_rota.x);
             }
-            if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_ROTATION_Y)) {
-                prop.constraints[anim_index].lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_itor->lower_limit + prop.rotaY);
-                prop.constraints[anim_index].upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_itor->upper_limit + prop.rotaY);
+            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Y)) {
+                anim.lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_def.lower_limit + prop.pp_rota.y);
+                anim.upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_def.upper_limit + prop.pp_rota.y);
             }
-            if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_ROTATION_Z)) {
-                prop.constraints[anim_index].lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_itor->lower_limit + prop.rotaZ);
-                prop.constraints[anim_index].upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_itor->upper_limit + prop.rotaZ);
+            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Z)) {
+                anim.lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_def.lower_limit + prop.pp_rota.z);
+                anim.upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_def.upper_limit + prop.pp_rota.z);
             }
-            if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_OFFSET_X)) {
-                prop.constraints[anim_index].lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_itor->lower_limit + prop.orgoffsetX);
-                prop.constraints[anim_index].upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_itor->upper_limit + prop.orgoffsetX);
+            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_X)) {
+                anim.lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_def.lower_limit + prop.pp_offset_orig.x);
+                anim.upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_def.upper_limit + prop.pp_offset_orig.x);
             }
-            if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_OFFSET_Y)) {
-                prop.constraints[anim_index].lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_itor->lower_limit + prop.orgoffsetY);
-                prop.constraints[anim_index].upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_itor->upper_limit + prop.orgoffsetY);
+            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Y)) {
+                anim.lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_def.lower_limit + prop.pp_offset_orig.y);
+                anim.upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_def.upper_limit + prop.pp_offset_orig.y);
             }
-            if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_OFFSET_Z)) {
-                prop.constraints[anim_index].lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_itor->lower_limit + prop.orgoffsetZ);
-                prop.constraints[anim_index].upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_itor->upper_limit + prop.orgoffsetZ);
+            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Z)) {
+                anim.lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_def.lower_limit + prop.pp_offset_orig.z);
+                anim.upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_def.upper_limit + prop.pp_offset_orig.z);
             }
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_NO_FLIP)) 
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_NO_FLIP)) 
         {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_NOFLIP);
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_NOFLIP);
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_BOUNCE)) 
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_BOUNCE)) 
         {
-            BITMASK_SET_1(prop.animMode[anim_index], ANIM_MODE_BOUNCE);
-            prop.animOpt5[anim_index] = 1.f;
+            BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_BOUNCE);
+            anim.animOpt5 = 1.f;
         }
-        if (BITMASK_IS_1(anim_itor->mode, RigDef::Animation::MODE_EVENT_LOCK)) 
+        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_EVENT_LOCK)) 
         {
-            prop.animKeyState[anim_index] = 0.0f;
-            prop.lastanimKS[anim_index] = 0.0f;
+            anim.animKeyState = 0.0f;
+            anim.lastanimKS = 0.0f;
         }
         
         /* Parameter 'event:' */
 
-        if (! anim_itor->event.empty())
+        if (! anim_def.event.empty())
         {
             // we are using keys as source
-            prop.animFlags[anim_index] |= ANIM_FLAG_EVENT;
+            anim.animFlags |= PROP_ANIM_FLAG_EVENT;
 
-            int event_id = RoR::App::GetInputEngine()->resolveEventName(anim_itor->event);
+            int event_id = RoR::App::GetInputEngine()->resolveEventName(anim_def.event);
             if (event_id == -1)
             {
-                AddMessage(Message::TYPE_ERROR, "Unknown animation event: " + anim_itor->event);
+                AddMessage(Message::TYPE_ERROR, "Unknown animation event: " + anim_def.event);
             }
             else
             {
-                prop.animKey[anim_index] = event_id;
+                anim.animKey = event_id;
             }
         }
-
-        /* Advance */
-        anim_itor++;
-        anim_index++;
+        prop.pp_animations.push_back(anim);
     }
     m_props.push_back(prop);
 }
@@ -3746,6 +3697,16 @@ void ActorSpawner::ProcessHydro(RigDef::Hydro & def)
     m_actor->ar_hydros.push_back(hb);
 }
 
+void ActorSpawner::ProcessScript(RigDef::Script & def)
+{
+    if (!ScriptEngine::getSingleton().loadActorScript(m_actor, def))
+    {
+        Str<400> msg;
+        msg << "Failed to load/compile/install script: " << def.filename;
+        this->AddMessage(Message::TYPE_ERROR, msg.ToCStr());
+    }
+}
+
 void ActorSpawner::ProcessShock3(RigDef::Shock3 & def)
 {
     node_t & node_1 = GetNode(def.nodes[0]);
@@ -4028,7 +3989,7 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         AdjustNodeBuoyancy(outer_node, def.node_defaults);
         m_actor->ar_minimass[outer_node.pos] = m_file->global_minimass->min_mass;
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(outer_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
         // Inner ring
         ray_point = axis_node_2->RelPosition + rim_ray_vector;
@@ -4043,7 +4004,7 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         AdjustNodeBuoyancy(inner_node, def.node_defaults);
         m_actor->ar_minimass[inner_node.pos] = m_file->global_minimass->min_mass;
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(inner_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
         // Wheel object
         wheel.wh_rim_nodes[i * 2]       = & outer_node;
@@ -4072,7 +4033,7 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         outer_node.nd_tyre_node  = true;
         AdjustNodeBuoyancy(outer_node, def.node_defaults);
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(outer_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
         // Inner ring
         ray_point = axis_node_2->RelPosition + tyre_ray_vector;
@@ -4088,7 +4049,7 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         inner_node.nd_tyre_node  = true;
         AdjustNodeBuoyancy(inner_node, def.node_defaults);
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(inner_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
         // Wheel object
         wheel.wh_nodes[i * 2] = & outer_node;
@@ -4392,7 +4353,7 @@ void ActorSpawner::BuildMeshWheelVisuals(
         Ogre::SceneNode* scene_node = gEnv->sceneManager->getRootSceneNode()->createChildSceneNode();
         scene_node->attachObject(flexmesh_wheel->GetTireEntity());
 
-        GfxActor::WheelGfx visual_wheel;
+        WheelGfx visual_wheel;
         visual_wheel.wx_is_meshwheel = false;
         visual_wheel.wx_flex_mesh = flexmesh_wheel;
         visual_wheel.wx_scenenode = scene_node;
@@ -4474,7 +4435,7 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
         outer_node.nd_tyre_node  = true;
         AdjustNodeBuoyancy(outer_node, node_defaults);
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(outer_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
         /* Inner ring */
         ray_point = axis_node_2->RelPosition + ray_vector;
@@ -4487,7 +4448,7 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
         inner_node.nd_tyre_node  = true;
         AdjustNodeBuoyancy(inner_node, node_defaults);
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(inner_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
         /* Wheel object */
         wheel.wh_nodes[i * 2] = & outer_node;
@@ -4716,7 +4677,7 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
 
         m_actor->ar_minimass[outer_node.pos] = m_file->global_minimass->min_mass;
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(outer_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
         /* Inner ring */
         ray_point = axis_node_2->RelPosition + rim_ray_vector;
@@ -4728,7 +4689,7 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
 
         m_actor->ar_minimass[inner_node.pos] = m_file->global_minimass->min_mass;
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(inner_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
         /* Wheel object */
         wheel.wh_rim_nodes[i * 2] = & outer_node;
@@ -4756,7 +4717,7 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
         outer_node.nd_contacter  = true;
         outer_node.nd_tyre_node  = true;
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(outer_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
         /* Inner ring */
         ray_point = axis_node_2->RelPosition + tyre_ray_vector;
@@ -4770,7 +4731,7 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
         inner_node.nd_contacter  = true;
         inner_node.nd_tyre_node  = true;
 
-        m_gfx_nodes.push_back(GfxActor::NodeGfx(static_cast<uint16_t>(inner_node.pos)));
+        m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
         /* Wheel object */
         wheel.wh_nodes[i * 2] = & outer_node;
@@ -4893,7 +4854,7 @@ void ActorSpawner::CreateWheelVisuals(
 
     try
     {
-        GfxActor::WheelGfx visual_wheel;
+        WheelGfx visual_wheel;
 
         const std::string wheel_mesh_name = this->ComposeName("WheelMesh", wheel_index);
         visual_wheel.wx_is_meshwheel = false;
@@ -5213,12 +5174,9 @@ void ActorSpawner::ProcessAuthors()
         author.type = author_itor->type;
         author.name = author_itor->name;
         author.email = author_itor->email;
-        if (author_itor->_has_forum_account)
-        {
-            author.id = author_itor->forum_account_id;
-        }
+        author.id = author_itor->forum_account_id;
         m_actor->authors.push_back(author);
-    }	
+    }
 
     SetCurrentKeyword(RigDef::File::KEYWORD_INVALID);
 };
@@ -5754,7 +5712,7 @@ void ActorSpawner::ProcessNode(RigDef::Node & def)
     if (def.position.y > m_fuse_y_max) { m_fuse_y_max = def.position.y; }
 
     // GFX
-    GfxActor::NodeGfx nfx(static_cast<uint16_t>(node.pos));
+    NodeGfx nfx(static_cast<uint16_t>(node.pos));
     nfx.nx_no_particles = BITMASK_IS_1(options, RigDef::Node::OPTION_p_NO_PARTICLES);
     nfx.nx_may_get_wet  = BITMASK_IS_0(options, RigDef::Node::OPTION_c_NO_GROUND_CONTACT);
     nfx.nx_no_particles = BITMASK_IS_1(options, RigDef::Node::OPTION_p_NO_PARTICLES);
@@ -5795,7 +5753,7 @@ void ActorSpawner::AddExhaust(
     exhaust.smokeNode->setPosition(m_actor->ar_nodes[exhaust.emitterNode].AbsPosition);
 
     // Update GFX for nodes
-    for (GfxActor::NodeGfx& nfx : m_gfx_nodes)
+    for (NodeGfx& nfx : m_gfx_nodes)
     {
         if (nfx.nx_node_idx == emitter_node_idx || nfx.nx_node_idx == direction_node_idx)
         {
@@ -6763,8 +6721,11 @@ void ActorSpawner::FinalizeGfxSetup()
             }
 
             // Process "emissive cab" materials
-            auto search_itor = m_material_substitutions.find(m_cab_material_name);
-            m_actor->m_gfx_actor->RegisterCabMaterial(search_itor->second.material, m_cab_trans_material);
+            Ogre::MaterialPtr cab_material = this->FindOrCreateCustomizedMaterial(m_cab_material_name);
+            if (cab_material)
+            {
+                m_actor->m_gfx_actor->RegisterCabMaterial(cab_material, m_cab_trans_material);
+            }
             m_actor->m_gfx_actor->SetCabLightsActive(false); // Reset emissive lights to "off" state
 
             m_actor->GetGfxActor()->RegisterCabMesh(ec, cab_scene_node, cab_mesh);
@@ -6996,7 +6957,7 @@ void ActorSpawner::CreateVideoCamera(RigDef::VideoCamera* def)
 {
     try
     {
-        GfxActor::VideoCamera vcam;
+        RoR::VideoCamera vcam;
 
         vcam.vcam_material = this->FindOrCreateCustomizedMaterial(def->material_name);
         if (vcam.vcam_material.isNull())
@@ -7007,9 +6968,9 @@ void ActorSpawner::CreateVideoCamera(RigDef::VideoCamera* def)
 
         switch (def->camera_role)
         {
-        case -1: vcam.vcam_type = GfxActor::VideoCamType::VCTYPE_VIDEOCAM;       break;
-        case  0: vcam.vcam_type = GfxActor::VideoCamType::VCTYPE_TRACKING_VIDEOCAM; break;
-        case  1: vcam.vcam_type = GfxActor::VideoCamType::VCTYPE_MIRROR;         break;
+        case -1: vcam.vcam_type = VCTYPE_VIDEOCAM;          break;
+        case  0: vcam.vcam_type = VCTYPE_TRACKING_VIDEOCAM; break;
+        case  1: vcam.vcam_type = VCTYPE_MIRROR;            break;
         default:
             this->AddMessage(Message::TYPE_ERROR, "VideoCamera (mat: " + def->material_name + ") has invalid 'role': " + TOSTRING(def->camera_role));
             return;
@@ -7041,7 +7002,7 @@ void ActorSpawner::CreateVideoCamera(RigDef::VideoCamera* def)
         if (def->alt_orientation_node.IsValidAnyState())
         {
             // This is a tracker camera
-            vcam.vcam_type = GfxActor::VideoCamType::VCTYPE_TRACKING_VIDEOCAM;
+            vcam.vcam_type = VCTYPE_TRACKING_VIDEOCAM;
             vcam.vcam_node_lookat = static_cast<uint16_t>(this->GetNodeOrThrow(def->alt_orientation_node).pos);
         }
 
@@ -7140,17 +7101,17 @@ void ActorSpawner::CreateMirrorPropVideoCam(
     try
     {
         // Prepare videocamera entry
-        GfxActor::VideoCamera vcam;
+        RoR::VideoCamera vcam;
         vcam.vcam_off_tex_name = "mirror.dds";
         vcam.vcam_prop_scenenode = prop_scenenode;
         switch (type)
         {
         case CustomMaterial::MirrorPropType::MPROP_LEFT:
-            vcam.vcam_type = GfxActor::VideoCamType::VCTYPE_MIRROR_PROP_LEFT;
+            vcam.vcam_type = VCTYPE_MIRROR_PROP_LEFT;
             break;
 
         case CustomMaterial::MirrorPropType::MPROP_RIGHT:
-            vcam.vcam_type = GfxActor::VideoCamType::VCTYPE_MIRROR_PROP_RIGHT;
+            vcam.vcam_type = VCTYPE_MIRROR_PROP_RIGHT;
             break;
 
         default:

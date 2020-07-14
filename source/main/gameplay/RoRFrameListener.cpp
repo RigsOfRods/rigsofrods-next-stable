@@ -1595,20 +1595,32 @@ void SimController::UpdateSimulation(float dt)
                 auto debug_view = m_player_actor->GetGfxActor()->GetDebugView();
                 auto asr_config = m_player_actor->GetSectionConfig();
                 auto used_skin  = m_player_actor->GetUsedSkin();
+                auto cache_entry= m_player_actor->GetCacheEntry();
+                auto project    = m_player_actor->GetProjectEntry();
 
                 reload_pos.y = m_player_actor->GetMinHeight();
 
                 m_prev_player_actor = nullptr;
                 this->ChangePlayerActor(nullptr);
-                this->RemoveActorDirectly(rq.amr_actor);
-                App::GetCacheSystem()->UnloadActorFromMemory(filename); // Force reload from filesystem
+                this->RemoveActorDirectly(rq.amr_actor);                
 
                 ActorSpawnRequest srq;
                 srq.asr_position = reload_pos;
                 srq.asr_rotation = reload_dir;
                 srq.asr_config   = asr_config;
                 srq.asr_skin_entry = used_skin;
-                srq.asr_filename = filename;
+                if (project)
+                {
+                    srq.asr_project = project; // Always reloaded from filesystem
+                    srq.asr_filename = filename; // Required for project
+                }
+                else
+                {
+                    App::GetCacheSystem()->UnloadActorFromMemory(filename); // Force reload from filesystem
+                    srq.asr_filename = filename; // Optional, used if cache entry is not available
+                    srq.asr_cache_entry = cache_entry;
+                }
+                
                 Actor* new_actor = this->SpawnActorDirectly(srq); // try to load the same actor again
                 if (new_actor)
                 {
@@ -2281,12 +2293,7 @@ void SimController::EnterGameplayLoop()
             }
         }
 
-        // TODO: Ugly! Currently it seems drawing DearIMGUI only works when invoked from `Ogre::FrameListener::frameRenderingQueued`.
-        //       We only want GUI on screen, not other targets (reflections etc...), so we can't have it attached permanently.
-        //       Research and find a more elegant solution.  ~ only_a_ptr, 07/2018
-        RoR::App::GetOgreSubsystem()->GetOgreRoot()->addFrameListener(&App::GetGuiManager()->GetImGui());
         RoR::App::GetOgreSubsystem()->GetOgreRoot()->renderOneFrame();
-        RoR::App::GetOgreSubsystem()->GetOgreRoot()->removeFrameListener(&App::GetGuiManager()->GetImGui());
 
         if (m_stats_on && RoR::App::GetOverlayWrapper())
         {
@@ -2497,11 +2504,11 @@ Actor* SimController::SpawnActorDirectly(RoR::ActorSpawnRequest rq)
 
     if (rq.asr_cache_entry != nullptr)
     {
+        App::app_state->SetPendingVal((int)AppState::MAIN_MENU);
         rq.asr_filename = rq.asr_cache_entry->fname;
     }
 
-    std::shared_ptr<RigDef::File> def = m_actor_manager.FetchActorDef(
-        rq.asr_filename, rq.asr_origin == ActorSpawnRequest::Origin::TERRN_DEF);
+    std::shared_ptr<RigDef::File> def = m_actor_manager.FetchActorDef(rq);
     if (def == nullptr)
     {
         return nullptr; // Error already reported
@@ -2549,6 +2556,11 @@ void SimController::RemoveActorDirectly(Actor* actor)
         m_character_factory.UndoRemoteActorCoupling(actor);
     }
 #endif //SOCKETW
+
+    if (actor->GetProjectEntry() == m_rig_editor.GetProjectEntry())
+    {
+        m_rig_editor.CloseProject();
+    }
 
     m_actor_manager.DeleteActorInternal(actor);
 }
