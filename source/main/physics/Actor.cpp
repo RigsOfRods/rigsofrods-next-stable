@@ -68,6 +68,9 @@
 #include "VehicleAI.h"
 #include "Water.h"
 
+#include <sstream>
+#include <iomanip>
+
 using namespace Ogre;
 using namespace RoR;
 
@@ -207,7 +210,7 @@ Actor::~Actor()
     this->ar_flares.clear();
 
     // delete exhausts
-    for (std::vector<exhaust_t>::iterator it = exhausts.begin(); it != exhausts.end(); it++)
+    for (std::vector<Exhaust>::iterator it = exhausts.begin(); it != exhausts.end(); it++)
     {
         if (it->smokeNode)
         {
@@ -343,6 +346,7 @@ Vector3 Actor::getPosition()
 
 void Actor::PushNetwork(char* data, int size)
 {
+#if USE_SOCKETW
     NetUpdate update;
 
     update.veh_state.resize(sizeof(RoRnet::VehicleState));
@@ -415,6 +419,7 @@ void Actor::PushNetwork(char* data, int size)
     }
 
     m_net_updates.push_back(update);
+#endif // USE_SOCKETW
 }
 
 void Actor::CalcNetwork()
@@ -683,15 +688,14 @@ void Actor::RecalculateNodeMasses(Real total)
     // Apply pre-defined cinecam node mass
     for (int i = 0; i < this->ar_num_cinecams; ++i)
     {
-        // TODO: this expects all cinecams to be defined in root module (i.e. outside 'section/end_section')
-        ar_nodes[ar_cinecam_node[i]].mass = m_definition->root_module->cinecam[i].node_mass;
+        ar_nodes[ar_cinecam_node[i]].mass = ar_cinecam_node_predef_mass[i];
     }
 
     //update mass
     for (int i = 0; i < ar_num_nodes; i++)
     {
         if (!ar_nodes[i].nd_tyre_node &&
-            !(m_definition->minimass_skip_loaded_nodes && ar_nodes[i].nd_loaded_mass) &&
+            !(ar_minimass_skip_loaded_nodes && ar_nodes[i].nd_loaded_mass) &&
             ar_nodes[i].mass < ar_minimass[i])
         {
             if (App::diag_truck_mass->GetBool())
@@ -1056,7 +1060,7 @@ void Actor::calculateAveragePosition()
         // the new (strange) approach: reuse the cinecam node
         m_avg_node_position = ar_nodes[ar_cinecam_node[0]].AbsPosition;
     }
-    else if (ar_extern_camera_mode == 2 && ar_extern_camera_node >= 0)
+    else if (ar_extern_camera_mode == 2 && ar_extern_camera_node != node_t::INVALID_IDX)
     {
         // the new (strange) approach #2: reuse a specified node
         m_avg_node_position = ar_nodes[ar_extern_camera_node].AbsPosition;
@@ -2020,20 +2024,10 @@ void Actor::sendStreamData()
 #endif //SOCKETW
 }
 
-void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real timer, const float lower_limit, const float upper_limit, const float option3)
+void Actor::CalcAnimators(hydrobeam_t const& hydrobeam, float &cstate, int &div)
 {
-    // ## DEV NOTE:
-    // ## Until 06/2018, this function was used for both animator-beams (physics, part of softbody) and animated props (visual-only).
-    // ## Animated props are now done by `GfxActor::CalcPropAnimation()`   ~ only_a_ptr
-
-    // -- WRITES --
-    // ANIM_FLAG_TORQUE: ar_anim_previous_crank
-    // sequential shifting: m_previous_gear, ar_anim_shift_timer
-
-    Real dt = timer;
-
-    //boat rudder - read only
-    if (flag_state & ANIM_FLAG_BRUDDER)
+    // boat rudder
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_BRUDDER)
     {
         int spi;
         float ctmp = 0.0f;
@@ -2047,8 +2041,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //boat throttle - read only
-    if (flag_state & ANIM_FLAG_BTHROTTLE)
+    // boat throttle
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_BTHROTTLE)
     {
         int spi;
         float ctmp = 0.0f;
@@ -2062,8 +2056,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //differential lock status - read only
-    if (flag_state & ANIM_FLAG_DIFFLOCK)
+    // differential lock status
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_DIFFLOCK)
     {
         if (m_num_wheel_diffs && m_wheel_diffs[0])
         {
@@ -2081,8 +2075,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //heading - read only
-    if (flag_state & ANIM_FLAG_HEADING)
+    // heading
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_HEADING)
     {
         float heading = getRotation();
         // rad2deg limitedrange  -1 to +1
@@ -2090,8 +2084,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //torque - WRITES 
-    if (ar_engine && flag_state & ANIM_FLAG_TORQUE)
+    // torque
+    if (ar_engine && hydrobeam.hb_anim_flags & ANIM_FLAG_TORQUE)
     {
         float torque = ar_engine->GetCrankFactor();
         if (torque <= 0.0f)
@@ -2107,57 +2101,43 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //shifterseq, to amimate sequentiell shifting
-    if (ar_engine && (flag_state & ANIM_FLAG_SHIFTER) && option3 == 3.0f)
+    // shifterseq, to amimate sequentiell shifting
+    if (ar_engine && (hydrobeam.hb_anim_flags & ANIM_FLAG_SHIFTER) && hydrobeam.hb_anim_param == 3.0f)
     {
-        // opt1 &opt2 = 0   this is a shifter
-        if (!lower_limit && !upper_limit)
-        {
-            int shifter = ar_engine->GetGear();
-            if (shifter > m_previous_gear)
-            {
-                cstate = 1.0f;
-                ar_anim_shift_timer = 0.2f;
-            }
-            if (shifter < m_previous_gear)
-            {
-                cstate = -1.0f;
-                ar_anim_shift_timer = -0.2f;
-            }
-            m_previous_gear = shifter;
 
-            if (ar_anim_shift_timer > 0.0f)
-            {
-                cstate = 1.0f;
-                ar_anim_shift_timer -= dt;
-                if (ar_anim_shift_timer < 0.0f)
-                    ar_anim_shift_timer = 0.0f;
-            }
-            if (ar_anim_shift_timer < 0.0f)
-            {
-                cstate = -1.0f;
-                ar_anim_shift_timer += dt;
-                if (ar_anim_shift_timer > 0.0f)
-                    ar_anim_shift_timer = 0.0f;
-            }
-        }
-        else
+        int shifter = ar_engine->GetGear();
+        if (shifter > m_previous_gear)
         {
-            // check if lower_limit is a valid to get commandvalue, then get commandvalue
-            if (lower_limit >= 1.0f && lower_limit <= 48.0)
-                if (ar_command_key[int(lower_limit)].commandValue > 0)
-                    cstate += 1.0f;
-            // check if upper_limit is a valid to get commandvalue, then get commandvalue
-            if (upper_limit >= 1.0f && upper_limit <= 48.0)
-                if (ar_command_key[int(upper_limit)].commandValue > 0)
-                    cstate -= 1.0f;
+            cstate = 1.0f;
+            ar_anim_shift_timer = 0.2f;
+        }
+        if (shifter < m_previous_gear)
+        {
+            cstate = -1.0f;
+            ar_anim_shift_timer = -0.2f;
+        }
+        m_previous_gear = shifter;
+
+        if (ar_anim_shift_timer > 0.0f)
+        {
+            cstate = 1.0f;
+            ar_anim_shift_timer -= PHYSICS_DT;
+            if (ar_anim_shift_timer < 0.0f)
+                ar_anim_shift_timer = 0.0f;
+        }
+        if (ar_anim_shift_timer < 0.0f)
+        {
+            cstate = -1.0f;
+            ar_anim_shift_timer += PHYSICS_DT;
+            if (ar_anim_shift_timer > 0.0f)
+                ar_anim_shift_timer = 0.0f;
         }
 
         div++;
     }
 
-    //shifterman1, left/right
-    if (ar_engine && (flag_state & ANIM_FLAG_SHIFTER) && option3 == 1.0f)
+    // shifterman1, left/right
+    if (ar_engine && (hydrobeam.hb_anim_flags & ANIM_FLAG_SHIFTER) && hydrobeam.hb_anim_param == 1.0f)
     {
         int shifter = ar_engine->GetGear();
         if (!shifter)
@@ -2175,8 +2155,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //shifterman2, up/down
-    if (ar_engine && (flag_state & ANIM_FLAG_SHIFTER) && option3 == 2.0f)
+    // shifterman2, up/down
+    if (ar_engine && (hydrobeam.hb_anim_flags & ANIM_FLAG_SHIFTER) && hydrobeam.hb_anim_param == 2.0f)
     {
         int shifter = ar_engine->GetGear();
         cstate = 0.5f;
@@ -2191,8 +2171,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //shifterlinear, to amimate cockpit gearselect gauge and autotransmission stick
-    if (ar_engine && (flag_state & ANIM_FLAG_SHIFTER) && option3 == 4.0f)
+    // shifterlinear, to amimate cockpit gearselect gauge and autotransmission stick
+    if (ar_engine && (hydrobeam.hb_anim_flags & ANIM_FLAG_SHIFTER) && hydrobeam.hb_anim_param == 4.0f)
     {
         int shifter = ar_engine->GetGear();
         int numgears = ar_engine->getNumGears();
@@ -2200,47 +2180,47 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //parking brake
-    if (flag_state & ANIM_FLAG_PBRAKE)
+    // parking brake
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_PBRAKE)
     {
         float pbrake = ar_parking_brake;
         cstate -= pbrake;
         div++;
     }
 
-    //speedo ( scales with speedomax )
-    if (flag_state & ANIM_FLAG_SPEEDO)
+    // speedo ( scales with speedomax )
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_SPEEDO)
     {
         float speedo = ar_wheel_speed / ar_speedo_max_kph;
         cstate -= speedo * 3.0f;
         div++;
     }
 
-    //engine tacho ( scales with maxrpm, default is 3500 )
-    if (ar_engine && flag_state & ANIM_FLAG_TACHO)
+    // engine tacho ( scales with maxrpm, default is 3500 )
+    if (ar_engine && hydrobeam.hb_anim_flags & ANIM_FLAG_TACHO)
     {
         float tacho = ar_engine->GetEngineRpm() / ar_engine->getMaxRPM();
         cstate -= tacho;
         div++;
     }
 
-    //turbo
-    if (ar_engine && flag_state & ANIM_FLAG_TURBO)
+    // turbo
+    if (ar_engine && hydrobeam.hb_anim_flags & ANIM_FLAG_TURBO)
     {
         float turbo = ar_engine->GetTurboPsi() * 3.34;
         cstate -= turbo / 67.0f;
         div++;
     }
 
-    //brake
-    if (flag_state & ANIM_FLAG_BRAKE)
+    // brake
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_BRAKE)
     {
         cstate -= ar_brake;
         div++;
     }
 
-    //accelerator
-    if (ar_engine && flag_state & ANIM_FLAG_ACCEL)
+    // accelerator
+    if (ar_engine && hydrobeam.hb_anim_flags & ANIM_FLAG_ACCEL)
     {
         float accel = ar_engine->GetAcceleration();
         cstate -= accel + 0.06f;
@@ -2248,21 +2228,19 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //clutch
-    if (ar_engine && flag_state & ANIM_FLAG_CLUTCH)
+    // clutch
+    if (ar_engine && hydrobeam.hb_anim_flags & ANIM_FLAG_CLUTCH)
     {
         float clutch = ar_engine->GetClutch();
         cstate -= fabs(1.0f - clutch);
         div++;
     }
 
-    //aeroengines rpm + throttle + torque ( turboprop ) + pitch ( turboprop ) + status +  fire
-    int ftp = ar_num_aeroengines;
-
-    if (ftp > option3 - 1.0f)
+    // aeroengines (hb_anim_param is the engine index)
+    if ((int)hydrobeam.hb_anim_param < ar_num_aeroengines)
     {
-        int aenum = int(option3 - 1.0f);
-        if (flag_state & ANIM_FLAG_RPM)
+        int aenum = (int)hydrobeam.hb_anim_param;
+        if (hydrobeam.hb_anim_flags & ANIM_FLAG_RPM)
         {
             float angle;
             float pcent = ar_aeroengines[aenum]->getRPMpc();
@@ -2275,30 +2253,30 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
             cstate -= angle / 314.0f;
             div++;
         }
-        if (flag_state & ANIM_FLAG_THROTTLE)
+        if (hydrobeam.hb_anim_flags & ANIM_FLAG_THROTTLE)
         {
             float throttle = ar_aeroengines[aenum]->getThrottle();
             cstate -= throttle;
             div++;
         }
 
-        if (flag_state & ANIM_FLAG_AETORQUE)
-            if (ar_aeroengines[aenum]->getType() == AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+        if (hydrobeam.hb_anim_flags & ANIM_FLAG_AETORQUE)
+            if (ar_aeroengines[aenum]->getType() == AEROENGINE_TURBOPROP_PISTONPROP)
             {
                 Turboprop* tp = (Turboprop*)ar_aeroengines[aenum];
                 cstate = (100.0 * tp->indicated_torque / tp->max_torque) / 120.0f;
                 div++;
             }
 
-        if (flag_state & ANIM_FLAG_AEPITCH)
-            if (ar_aeroengines[aenum]->getType() == AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+        if (hydrobeam.hb_anim_flags & ANIM_FLAG_AEPITCH)
+            if (ar_aeroengines[aenum]->getType() == AEROENGINE_TURBOPROP_PISTONPROP)
             {
                 Turboprop* tp = (Turboprop*)ar_aeroengines[aenum];
                 cstate = tp->pitch / 120.0f;
                 div++;
             }
 
-        if (flag_state & ANIM_FLAG_AESTATUS)
+        if (hydrobeam.hb_anim_flags & ANIM_FLAG_AESTATUS)
         {
             if (!ar_aeroengines[aenum]->getIgnition())
                 cstate = 0.0f;
@@ -2310,20 +2288,12 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         }
     }
 
-    //airspeed indicator
-    if (flag_state & ANIM_FLAG_AIRSPEED)
+    // airspeed indicator
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_AIRSPEED)
     {
-        // TODO Unused Varaible
-        //float angle=0.0;
         float ground_speed_kt = ar_nodes[0].Velocity.length() * 1.9438;
         float altitude = ar_nodes[0].AbsPosition.y;
-
-        // TODO Unused Varaible
-        //float sea_level_temperature=273.15+15.0; //in Kelvin
         float sea_level_pressure = 101325; //in Pa
-
-        // TODO Unused Varaible
-        //float airtemperature=sea_level_temperature-altitude*0.0065; //in Kelvin
         float airpressure = sea_level_pressure * pow(1.0 - 0.0065 * altitude / 288.15, 5.24947); //in Pa
         float airdensity = airpressure * 0.0000120896;//1.225 at sea level
         float kt = ground_speed_kt * sqrt(airdensity / 1.225);
@@ -2331,8 +2301,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //vvi indicator
-    if (flag_state & ANIM_FLAG_VVI)
+    // vvi indicator
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_VVI)
     {
         float vvi = ar_nodes[0].Velocity.y * 196.85;
         // limit vvi scale to +/- 6m/s
@@ -2344,11 +2314,11 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //altimeter
-    if (flag_state & ANIM_FLAG_ALTIMETER)
+    // altimeter
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_ALTIMETER)
     {
         //altimeter indicator 1k oscillating
-        if (option3 == 3.0f)
+        if (hydrobeam.hb_anim_param == 3.0f)
         {
             float altimeter = (ar_nodes[0].AbsPosition.y * 1.1811) / 360.0f;
             int alti_int = int(altimeter);
@@ -2357,7 +2327,7 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         }
 
         //altimeter indicator 10k oscillating
-        if (option3 == 2.0f)
+        if (hydrobeam.hb_anim_param == 2.0f)
         {
             float alti = ar_nodes[0].AbsPosition.y * 1.1811 / 3600.0f;
             int alti_int = int(alti);
@@ -2368,7 +2338,7 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         }
 
         //altimeter indicator 100k limited
-        if (option3 == 1.0f)
+        if (hydrobeam.hb_anim_param == 1.0f)
         {
             float alti = ar_nodes[0].AbsPosition.y * 1.1811 / 36000.0f;
             cstate -= alti;
@@ -2378,8 +2348,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //AOA
-    if (flag_state & ANIM_FLAG_AOA)
+    // AOA
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_AOA)
     {
         float aoa = 0;
         if (ar_num_wings > 4)
@@ -2395,7 +2365,7 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
     }
 
     // roll
-    if (flag_state & ANIM_FLAG_ROLL)
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_ROLL)
     {
         Vector3 rollv = this->GetCameraRoll();
         Vector3 dirv = this->GetCameraDir();
@@ -2415,7 +2385,7 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
     }
 
     // pitch
-    if (flag_state & ANIM_FLAG_PITCH)
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_PITCH)
     {
         Vector3 dirv = this->GetCameraDir();
         float pitchangle = asin(dirv.dotProduct(Vector3::UNIT_Y));
@@ -2425,7 +2395,7 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
     }
 
     // airbrake
-    if (flag_state & ANIM_FLAG_AIRBRAKE)
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_AIRBRAKE)
     {
         float airbrake = ar_airbrake_intensity;
         // cstate limited to -1.0f
@@ -2433,8 +2403,8 @@ void Actor::CalcAnimators(const int flag_state, float& cstate, int& div, Real ti
         div++;
     }
 
-    //flaps
-    if (flag_state & ANIM_FLAG_FLAP)
+    // flaps
+    if (hydrobeam.hb_anim_flags & ANIM_FLAG_FLAP)
     {
         float flaps = FLAP_ANGLES[ar_aerial_flap];
         // cstate limited to -1.0f
@@ -3178,7 +3148,7 @@ void Actor::updateVisual(float dt)
     // TODO: Move to GfxActor, don't forget dt*m_simulation_speed
     if (!m_disable_smoke && ar_engine && exhausts.size() > 0)
     {
-        std::vector<exhaust_t>::iterator it;
+        std::vector<Exhaust>::iterator it;
         for (it = exhausts.begin(); it != exhausts.end(); it++)
         {
             if (!it->smoker)
@@ -4211,7 +4181,7 @@ void Actor::updateDashBoards(float dt)
 	RoR::App::GetOverlayWrapper()->vvitexture->setTextureRotate(Degree(-angle+90.0));
 
 
-	if (curr_truck->aeroengines[0]->getType() == AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+	if (curr_truck->aeroengines[0]->getType() == AEROENGINE_TURBOPROP_PISTONPROP)
 	{
 		Turboprop *tp=(Turboprop*)curr_truck->aeroengines[0];
     //pitch
@@ -4224,7 +4194,7 @@ void Actor::updateDashBoards(float dt)
 		RoR::App::GetOverlayWrapper()->airtorque1texture->setTextureRotate(Degree(-angle));
 	}
 
-	if (ftp>1 && curr_truck->aeroengines[1]->getType()==AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+	if (ftp>1 && curr_truck->aeroengines[1]->getType()==AEROENGINE_TURBOPROP_PISTONPROP)
 	{
 		Turboprop *tp=(Turboprop*)curr_truck->aeroengines[1];
     //pitch
@@ -4237,7 +4207,7 @@ void Actor::updateDashBoards(float dt)
 		RoR::App::GetOverlayWrapper()->airtorque2texture->setTextureRotate(Degree(-angle));
 	}
 
-	if (ftp>2 && curr_truck->aeroengines[2]->getType()==AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+	if (ftp>2 && curr_truck->aeroengines[2]->getType()==AEROENGINE_TURBOPROP_PISTONPROP)
 	{
 		Turboprop *tp=(Turboprop*)curr_truck->aeroengines[2];
     //pitch
@@ -4250,7 +4220,7 @@ void Actor::updateDashBoards(float dt)
 		RoR::App::GetOverlayWrapper()->airtorque3texture->setTextureRotate(Degree(-angle));
 	}
 
-	if (ftp>3 && curr_truck->aeroengines[3]->getType()==AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+	if (ftp>3 && curr_truck->aeroengines[3]->getType()==AEROENGINE_TURBOPROP_PISTONPROP)
 	{
 		Turboprop *tp=(Turboprop*)curr_truck->aeroengines[3];
     //pitch
@@ -4333,7 +4303,7 @@ void Actor::EngineTriggerHelper(int engineNumber, EngineTriggerType type, float 
 Actor::Actor(
     int actor_id,
     unsigned int vector_index,
-    std::shared_ptr<RigDef::File> def,
+    Truck::DocumentPtr def,
     RoR::ActorSpawnRequest rq
 ) 
     : ar_nodes(nullptr), ar_num_nodes(0)
@@ -4395,9 +4365,6 @@ Actor::Actor(
     , m_avg_node_velocity(Ogre::Vector3::ZERO)
     , ar_custom_camera_node(-1)
     , ar_main_camera_dir_corr(Ogre::Quaternion::IDENTITY)
-    , ar_main_camera_node_pos(0)
-    , ar_main_camera_node_dir(0)
-    , ar_main_camera_node_roll(0)
     , m_preloaded_with_terrain(rq.asr_origin == RoR::ActorSpawnRequest::Origin::TERRN_DEF)
     , ar_net_source_id(0)
     , m_spawn_rotation(0.0)
@@ -4473,6 +4440,8 @@ Actor::Actor(
     , ar_top_speed(0.0f)
     , ar_last_fuzzy_ground_model(nullptr)
     , m_transfer_case(nullptr)
+    , m_cache_entry(rq.asr_cache_entry)
+    , ar_slidenodes_connect_instantly(false)
 {
 }
 
@@ -4571,4 +4540,87 @@ Vector3 Actor::getNodePosition(int nodeNumber)
     {
         return Ogre::Vector3();
     }
+}
+
+void Actor::WriteDiagnosticDump(std::string const& fileName)
+{
+    // Purpose: to diff against output from https://github.com/only-a-ptr/rigs-of-rods/tree/retro-0407
+    std::stringstream buf;
+
+    buf << "[nodes]" << std::endl;
+    for (int i = 0; i < ar_num_nodes; i++)
+    {
+        buf 
+            << "  pos:"              << std::setw(3) << ar_nodes[i].pos // indicated pos in node buffer
+                                        << ((ar_nodes[i].pos != i) ? " !!sync " : "") // warn if the indicated pos doesn't match
+            << " (nodes)"
+            << " id:"                << std::setw(3) << ar_nodes_id[i]
+            << " name:"              << std::setw(ar_nodes_name_top_length) << ar_nodes_name[i]
+            << ", buoyancy:"         << std::setw(8) << ar_nodes[i].buoyancy
+            << ", loaded:"           << (int)(ar_nodes[i].nd_loaded_mass)
+            << " (wheels)"
+            << " wheel_rim:"         << (int)ar_nodes[i].nd_rim_node
+            << ", wheel_tyre:"       << (int)ar_nodes[i].nd_tyre_node
+            << " (set_node_defaults)"
+            << " mass:"              << std::setw(8) << ar_nodes[i].mass // param 1 load weight
+            << ", friction_coef:"    << std::setw(5) << ar_nodes[i].friction_coef // param 2 friction coef
+            << ", volume_coef:"      << ar_nodes[i].volume_coef // param 3 volume coef
+            << ", surface_coef:"     << ar_nodes[i].surface_coef // param 4 surface coef
+            << ", overrideMass:"     << ar_nodes[i].nd_override_mass // depends on param 1 load weight
+
+            // only set by `ActorSpawner::UpdateCollcabContacterNodes()` based on collcabs
+            // The 'retro-0407' equivalent is `node::contacter` set by `Beam::updateContacterNodes()` based on collcabs!
+            << " (collcabs)"
+            << " "                   << ar_nodes[i].nd_cab_node
+            << std::endl;
+    }
+
+    buf << "[beams]" << std::endl;
+    for (int i = 0; i < ar_num_beams; i++)
+    {
+        buf
+            << "  "                  << std::setw(4) << i // actual pos in beam buffer
+            << ", node1:"            << std::setw(3) << ((ar_beams[i].p1) ? ar_nodes_id[ar_beams[i].p1->pos] : -1)
+            << ", node2:"            << std::setw(3) << ((ar_beams[i].p2) ? ar_nodes_id[ar_beams[i].p2->pos] : -1)
+            << ", refLen:"           << std::setw(9) << ar_beams[i].refL
+            << " (set_beam_defaults/scale)"
+            << " spring:"            << std::setw(8) << ar_beams[i].k //param1 default_spring
+            << ", damp:"             << std::setw(8) << ar_beams[i].d //param2 default_damp
+            << ", default_deform:"   << std::setw(8) << ar_beams[i].default_beam_deform //param3 default_deform
+            << ", strength:"         << std::setw(8) << ar_beams[i].strength //param4 default_break
+                                        //param5 default_beam_diameter ~ only visual
+                                        //param6 default_beam_material2 ~ only visual
+            << ", plastic_coef:"     << std::setw(8) << ar_beams[i].plastic_coef //param7 default_plastic_coef
+            << std::endl;
+    }
+
+    if (ar_node_to_node_connections.size() == (size_t)ar_num_nodes
+        && ar_node_to_beam_connections.size() == (size_t)ar_num_nodes) // not present when dumping 'raw'
+    {
+        buf << "[node connections]" << std::endl;
+        for (int n1 = 0; n1 < ar_num_nodes; n1++)
+        {
+            buf << std::setw(4) << n1 << ": nodes ";
+            for (int n2: ar_node_to_node_connections[n1])
+            {
+                buf << n2 << " ";
+            }
+            buf << ", beams ";
+            for (int b: ar_node_to_beam_connections[n1])
+            {
+                buf << b << " ";
+            }
+            buf << std::endl;
+        }
+    }
+
+    // Write out to 'logs' using OGRE resource system - complicated, but works with Unicode paths on Windows
+    Ogre::String rgName = "dumpRG";
+    Ogre::ResourceGroupManager::getSingleton().addResourceLocation(
+        App::sys_logs_dir->GetStr(), "FileSystem", rgName, /*recursive=*/false, /*readOnly=*/false);
+    Ogre::ResourceGroupManager::getSingleton().initialiseResourceGroup(rgName);
+    Ogre::DataStreamPtr outStream = Ogre::ResourceGroupManager::getSingleton().createResource(fileName, rgName, /*overwrite=*/true);
+    std::string text = buf.str();
+    outStream->write(text.c_str(), text.length());
+    Ogre::ResourceGroupManager::getSingleton().destroyResourceGroup(rgName);
 }

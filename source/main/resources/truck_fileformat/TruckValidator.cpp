@@ -23,15 +23,18 @@
 /// @author Petr Ohlidal
 /// @date   12/2013
 
-#include "RigDef_Validator.h"
+#include "TruckValidator.h"
 
 #include "SimConstants.h"
 #include "Application.h"
 #include "Console.h"
 
+using namespace RoR;
+using namespace Truck;
+
 #define CHECK_SECTION_IN_ALL_MODULES(_CLASS_, _FIELD_, _FUNCTION_) \
 { \
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin(); \
+    std::list<Truck::ModulePtr>::iterator module_itor = m_selected_modules.begin(); \
     for (; module_itor != m_selected_modules.end(); module_itor++) \
     { \
         std::vector<_CLASS_>::iterator section_itor = module_itor->get()->_FIELD_.begin(); \
@@ -49,45 +52,9 @@
     } \
 }
 
-namespace RigDef
-{
-
 bool Validator::Validate()
 {
-    bool valid = true;
 
-    /* CHECK CONFIGURATION (SELECTED MODULES TOGETHER) */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_GLOBALS, true, true); /* Unique, required */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_NODES, false, true); /* Required; sections nodes/nodes2 are unified here. */
-
-    if (m_check_beams)
-    {
-        valid &= CheckSection(RigDef::File::KEYWORD_BEAMS, false, true); /* Required */
-    }
-
-    valid &= CheckSection(RigDef::File::KEYWORD_ENGINE, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_ENGOPTION, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_ENGTURBO, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_TORQUECURVE, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_SPEEDLIMITER, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_MANAGEDMATERIALS, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_GUISETTINGS, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_EXTCAMERA, true, false); /* Unique */
-
-    valid &= CheckSection(RigDef::File::KEYWORD_FUSEDRAG, true, false); /* Unique */
-
-    valid &= CheckSectionSubmeshGroundmodel(); /* Unique */
-
-    valid &= CheckGearbox(); /* Min. 1 forward gear */
 
     /* CHECK INDIVIDUAL LINES (remove invalid entries) */
 
@@ -105,14 +72,18 @@ bool Validator::Validate()
 
     CHECK_SECTION_IN_ALL_MODULES(Flare2, flares_2, CheckFlare2);
 
-    return valid;
+    return true; // FIXME
 }
 
-void Validator::Setup(std::shared_ptr<RigDef::File> file)
+void Validator::Setup(Truck::DocumentPtr truck)
 {
-    m_file = file;
-    m_selected_modules.push_back(file->root_module);
+    m_truck = truck;
     m_check_beams = true;
+}
+
+void Validator::AddModule(Truck::ModulePtr modul)
+{
+    m_selected_modules.push_back(modul);
 }
 
 void Validator::AddMessage(Validator::Message::Type type, Ogre::String const & text)
@@ -137,159 +108,10 @@ void Validator::AddMessage(Validator::Message::Type type, Ogre::String const & t
     RoR::App::GetConsole()->putMessage(RoR::Console::CONSOLE_MSGTYPE_ACTOR, cm_type, text);
 }
 
-bool Validator::CheckSectionSubmeshGroundmodel()
-{
-    Ogre::String *containing_module_name = nullptr;
 
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin();
-    for (; module_itor != m_selected_modules.end(); module_itor++)
-    {
-        if (! module_itor->get()->submeshes_ground_model_name.empty())
-        {
-            if (containing_module_name == nullptr)
-            {
-                containing_module_name = & module_itor->get()->name;
-            }
-            else
-            {
-                std::stringstream text;
-                text << "Duplicate inline-section 'submesh_groundmodel'; found in modules: '" 
-                    << *containing_module_name << "' & '" << module_itor->get()->name << "'";
-                AddMessage(Message::TYPE_FATAL_ERROR, text.str());
-                return false;
-            }
-        }
-    }
 
-    return true;
-}
 
-bool Validator::CheckSection(RigDef::File::Keyword keyword, bool unique, bool required)
-{
-    Ogre::String *containing_module_name = nullptr;
-
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin();
-    for (; module_itor != m_selected_modules.end(); module_itor++)
-    {
-        if (HasModuleKeyword(*module_itor, keyword))
-        {
-            if (containing_module_name == nullptr)
-            {
-                containing_module_name = & module_itor->get()->name;
-            }
-            else if (unique)
-            {
-                std::stringstream text;
-                text << "Duplicate section '" << RigDef::File::KeywordToString(keyword)
-                    << "'; found in modules: '" << *containing_module_name
-                    << "' & '" << module_itor->get()->name << "'";
-                AddMessage(Message::TYPE_FATAL_ERROR, text.str());
-                return false;
-            }
-        }
-    }
-
-    if (containing_module_name == nullptr && required)
-    {
-        std::stringstream text;
-        text << "Missing required section '" << RigDef::File::KeywordToString(keyword) <<"'";
-        AddMessage(Message::TYPE_FATAL_ERROR, text.str());
-        return false;
-    }
-    return true;
-}
-
-bool Validator::HasModuleKeyword(std::shared_ptr<RigDef::File::Module> module, RigDef::File::Keyword keyword)
-{
-    using namespace RigDef;
-
-    switch (keyword)
-    {
-        /* Please maintain alphabetical order */
-
-        case (File::KEYWORD_BEAMS):
-            return ! module->beams.empty();
-
-        case (File::KEYWORD_ENGINE):
-            return (module->engine != nullptr);
-
-        case (File::KEYWORD_ENGOPTION):
-            return (module->engoption != nullptr);
-
-        case (File::KEYWORD_ENGTURBO) :
-            return (module->engturbo != nullptr);
-
-        case (File::KEYWORD_EXTCAMERA):
-            return (module->ext_camera != nullptr);
-
-        case (File::KEYWORD_FUSEDRAG):
-            return ! module->fusedrag.empty();
-
-        case (File::KEYWORD_GLOBALS):
-            return (module->globals != nullptr);
-
-        case (File::KEYWORD_GUISETTINGS):
-            return (module->gui_settings != nullptr);
-
-        case (File::KEYWORD_MANAGEDMATERIALS):
-            return ! module->managed_materials.empty();
-
-        case (File::KEYWORD_NODES):
-            return ! module->nodes.empty();
-
-        case (File::KEYWORD_SPEEDLIMITER):
-            return (module->speed_limiter.is_enabled);
-
-        case (File::KEYWORD_TORQUECURVE):
-            return (module->torque_curve != nullptr);
-        
-        /* TEMPLATE
-        case (File::SECTION_):
-            return (module->globals != nullptr);
-        */
-
-        default:
-            return false;
-    };
-}
-
-bool Validator::AddModule(Ogre::String const & module_name)
-{
-    std::map< Ogre::String, std::shared_ptr<RigDef::File::Module> >::iterator result 
-        = m_file->user_modules.find(module_name);
-
-    if (result != m_file->user_modules.end())
-    {
-        m_selected_modules.push_back(result->second);
-        return true;
-    }
-    return false;
-}
-
-bool Validator::CheckGearbox()
-{
-    /* Find it */
-    std::shared_ptr<RigDef::Engine> engine;
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin();
-    for (; module_itor != m_selected_modules.end(); module_itor++)
-    {
-        if (module_itor->get()->engine != nullptr)
-        {
-            if (module_itor->get()->engine->gear_ratios.size() > 0)
-            {
-                return true;
-            }
-            else
-            {
-                AddMessage(Message::TYPE_FATAL_ERROR, "Engine must have at least 1 forward gear.");
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-bool Validator::CheckShock2(RigDef::Shock2 & shock2)
+bool Validator::CheckShock2(Truck::Shock2 & shock2)
 {
     std::list<Ogre::String> bad_fields;
 
@@ -358,7 +180,7 @@ bool Validator::CheckShock2(RigDef::Shock2 & shock2)
     return true;
 }
 
-bool Validator::CheckShock3(RigDef::Shock3 & shock3)
+bool Validator::CheckShock3(Truck::Shock3 & shock3)
 {
     std::list<Ogre::String> bad_fields;
 
@@ -435,20 +257,26 @@ bool Validator::CheckShock3(RigDef::Shock3 & shock3)
     return true;
 }
 
-bool Validator::CheckAnimator(RigDef::Animator & def)
+bool Validator::CheckAnimator(Truck::Animator & def)
 {
+    // Ignore non-source flags
     unsigned int source_check = def.flags;
-    BITMASK_SET_0(source_check, RigDef::Animator::OPTION_SHORT_LIMIT);
-    BITMASK_SET_0(source_check, RigDef::Animator::OPTION_LONG_LIMIT);
-    if (source_check == 0)
+    BITMASK_SET_0(source_check, Truck::Animator::OPTION_SHORT_LIMIT);
+    BITMASK_SET_0(source_check, Truck::Animator::OPTION_LONG_LIMIT);
+    BITMASK_SET_0(source_check, Truck::Animator::OPTION_VISIBLE);
+    BITMASK_SET_0(source_check, Truck::Animator::OPTION_INVISIBLE);
+    if (source_check != 0 || def.aero_animator.flags != 0)
     {
-        AddMessage(Message::TYPE_ERROR, "Failed to identify animator source");
+        return true;
+    }
+    else
+    {
+        AddMessage(Message::TYPE_ERROR, "Animator: No animator source defined");
         return false;
     }
-    return true;
 }
 
-bool Validator::CheckCommand(RigDef::Command2 & def)
+bool Validator::CheckCommand(Truck::Command2 & def)
 {
     bool ok = true;
 
@@ -475,7 +303,7 @@ bool Validator::CheckCommand(RigDef::Command2 & def)
     return ok;
 }
 
-bool Validator::CheckFlare2(RigDef::Flare2 & def)
+bool Validator::CheckFlare2(Truck::Flare2 & def)
 {
     bool ok = true;
     
@@ -498,18 +326,18 @@ bool Validator::CheckFlare2(RigDef::Flare2 & def)
     return ok;
 }
 
-bool Validator::CheckTrigger(RigDef::Trigger & def)
+bool Validator::CheckTrigger(Truck::Trigger & def)
 {
     bool ok = true;
 
     bool hook_toggle = 
-        BITMASK_IS_1(def.options, RigDef::Trigger::OPTION_H_LOCK_HOOKGROUPS_KEY)
-        || BITMASK_IS_1(def.options, RigDef::Trigger::OPTION_h_UNLOCK_HOOKGROUPS_KEY);
+        BITMASK_IS_1(def.options, Truck::Trigger::OPTION_H_LOCK_HOOKGROUPS_KEY)
+        || BITMASK_IS_1(def.options, Truck::Trigger::OPTION_h_UNLOCK_HOOKGROUPS_KEY);
 
-    bool trigger_blocker = BITMASK_IS_1(def.options, RigDef::Trigger::OPTION_B_BLOCK_TRIGGERS);
-    bool inv_trigger_blocker = BITMASK_IS_1(def.options, RigDef::Trigger::OPTION_A_INV_BLOCK_TRIGGERS);
+    bool trigger_blocker = BITMASK_IS_1(def.options, Truck::Trigger::OPTION_B_BLOCK_TRIGGERS);
+    bool inv_trigger_blocker = BITMASK_IS_1(def.options, Truck::Trigger::OPTION_A_INV_BLOCK_TRIGGERS);
 
-    if (BITMASK_IS_0(def.options, RigDef::Trigger::OPTION_E_ENGINE_TRIGGER))
+    if (BITMASK_IS_0(def.options, Truck::Trigger::OPTION_E_ENGINE_TRIGGER))
     {
         if (! trigger_blocker && ! inv_trigger_blocker && ! hook_toggle )
         {
@@ -550,7 +378,7 @@ bool Validator::CheckTrigger(RigDef::Trigger & def)
     else
     {
         /* Engine trigger */
-        if (trigger_blocker || inv_trigger_blocker || hook_toggle || BITMASK_IS_1(def.options, RigDef::Trigger::OPTION_s_SWITCH_CMD_NUM))
+        if (trigger_blocker || inv_trigger_blocker || hook_toggle || BITMASK_IS_1(def.options, Truck::Trigger::OPTION_s_SWITCH_CMD_NUM))
         {
             AddMessage(Message::TYPE_ERROR, "Wrong command-eventnumber. Engine trigger deactivated.");
             ok = false;
@@ -560,7 +388,7 @@ bool Validator::CheckTrigger(RigDef::Trigger & def)
     return ok;
 }
 
-bool Validator::CheckVideoCamera(RigDef::VideoCamera & def)
+bool Validator::CheckVideoCamera(Truck::VideoCamera & def)
 {
     bool ok = true;
 
@@ -592,4 +420,3 @@ bool Validator::CheckVideoCamera(RigDef::VideoCamera & def)
     return ok;
 }
 
-} // namespace RigDef

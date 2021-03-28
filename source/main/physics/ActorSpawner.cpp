@@ -65,6 +65,7 @@
 #include "SoundScriptManager.h"
 #include "TerrainManager.h"
 #include "TorqueCurve.h"
+#include "TruckValidator.h"
 #include "TurboJet.h"
 #include "TurboProp.h"
 #include "Utils.h"
@@ -76,6 +77,7 @@
 #include <OgreParticleSystem.h>
 #include <OgreEntity.h>
 #include <climits>
+#include <fmt/core.h>
 
 const char* ACTOR_ID_TOKEN = "@Actor_"; // Appended to material name, followed by actor ID (aka 'trucknum')
 
@@ -87,7 +89,7 @@ using namespace RoR;
 
 void ActorSpawner::Setup(
     Actor *rig,
-    std::shared_ptr<RigDef::File> file,
+    Truck::DocumentPtr file,
     Ogre::SceneNode *parent,
     Ogre::Vector3 const & spawn_position
 )
@@ -96,7 +98,7 @@ void ActorSpawner::Setup(
     m_file = file;
     m_particles_parent_scenenode = parent;
     m_spawn_position = spawn_position;
-    m_current_keyword = RigDef::File::KEYWORD_INVALID;
+    m_current_keyword = Truck::KEYWORD_NONE;
     m_wing_area = 0.f;
     m_fuse_z_min = 1000.0f;
     m_fuse_z_max = -1000.0f;
@@ -106,23 +108,17 @@ void ActorSpawner::Setup(
     m_driverseat_prop_index = -1;
     m_oldstyle_renderdash = nullptr;
 
-    m_generate_wing_position_lights = true;
-    // TODO: Handle modules
-    if (file->root_module->engine.get() != nullptr) // Engine present => it's a land vehicle.
-    {
-        m_generate_wing_position_lights = false; // Disable aerial pos. lights for land vehicles.
-    }
-
     App::GetCacheSystem()->CheckResourceLoaded(m_actor->ar_filename, m_custom_resource_group);
 }
 
-void ActorSpawner::CalcMemoryRequirements(ActorMemoryRequirements& req, RigDef::File::Module* module_def)
+void ActorSpawner::CalcMemoryRequirements(ActorMemoryRequirements& req, Truck::Module* module_def)
 {
     // 'nodes'
     req.num_nodes += module_def->nodes.size();
     for (auto& def: module_def->nodes)
     {
-        if (BITMASK_IS_1(def.options, RigDef::Node::OPTION_h_HOOK_POINT))
+        // FIXME: what if user defines the 'h' flag in 'set_node_defaults'? Old parser was fine with pre-defined beam array, we have a problem.
+        if (def.options.find(Truck::Node::OPTION_h_HOOK_POINT) != std::string::npos)
         {
             req.num_beams += 1;
         }
@@ -151,7 +147,7 @@ void ActorSpawner::CalcMemoryRequirements(ActorMemoryRequirements& req, RigDef::
     req.num_nodes += module_def->cinecam.size();
     req.num_beams += module_def->cinecam.size() * 8;
 
-    // 'shocks' and 'shocks2'
+    // 'shocks', 'shocks2', 'shocks3'
     req.num_beams  += module_def->shocks.size();
     req.num_shocks += module_def->shocks.size();
     req.num_beams  += module_def->shocks_2.size();
@@ -170,14 +166,14 @@ void ActorSpawner::CalcMemoryRequirements(ActorMemoryRequirements& req, RigDef::
     req.num_wings += module_def->wings.size();
 
     // 'wheels'
-    for (RigDef::Wheel& wheel: module_def->wheels)
+    for (Truck::Wheel& wheel: module_def->wheels)
     {
         req.num_nodes += wheel.num_rays * 2; // BuildWheelObjectAndNodes()
         req.num_beams += wheel.num_rays * ((wheel.rigidity_node.IsValidAnyState()) ? 9 : 8); // BuildWheelBeams()
     }
 
     // 'wheels2'
-    for (RigDef::Wheel2& wheel2: module_def->wheels_2)
+    for (Truck::Wheel2& wheel2: module_def->wheels_2)
     {
         req.num_nodes += wheel2.num_rays * 4;
         // Rim beams:  num_rays*10 (*11 with valid rigidity_node)
@@ -186,14 +182,14 @@ void ActorSpawner::CalcMemoryRequirements(ActorMemoryRequirements& req, RigDef::
     }
 
     // 'meshwheels' & 'meshwheels2' (unified)
-    for (RigDef::MeshWheel& meshwheel: module_def->mesh_wheels)
+    for (Truck::MeshWheel& meshwheel: module_def->mesh_wheels)
     {
         req.num_nodes += meshwheel.num_rays * 2; // BuildWheelObjectAndNodes()
         req.num_beams += meshwheel.num_rays * ((meshwheel.rigidity_node.IsValidAnyState()) ? 9 : 8); // BuildWheelBeams()
     }
 
     // 'flexbodywheels'
-    for (RigDef::FlexBodyWheel& flexwheel: module_def->flex_body_wheels)
+    for (Truck::FlexBodyWheel& flexwheel: module_def->flex_body_wheels)
     {
         req.num_nodes += flexwheel.num_rays * 4;
         // Rim beams:      num_rays*8
@@ -220,6 +216,12 @@ void ActorSpawner::InitializeRig()
     // Allocate memory as needed
     m_actor->ar_beams = new beam_t[req.num_beams];
     m_actor->ar_nodes = new node_t[req.num_nodes];
+    m_actor->ar_nodes_id = new int[req.num_nodes];
+    for (size_t i = 0; i < req.num_nodes; ++i)
+    {
+        m_actor->ar_nodes_id[i] = -1;
+    }
+    m_actor->ar_nodes_name = new std::string[req.num_nodes];
 
     if (req.num_shocks > 0)
         m_actor->ar_shocks = new shock_t[req.num_shocks];
@@ -230,9 +232,8 @@ void ActorSpawner::InitializeRig()
     if (req.num_wings > 0)
         m_actor->ar_wings = new wing_t[req.num_wings];
 
-    m_actor->ar_minimass.resize(req.num_nodes);
-
-    // TODO: Perform these inits in constructor instead! ~ only_a_ptr, 01/2018
+    // Values of 'set_default_minimass', or -1 where global minimass from 'minimass' should be filled later.
+    m_actor->ar_minimass.resize(req.num_nodes, -1.f);
 
     // commands contain complex data structures, do not memset them ...
     for (int i=0;i<MAX_COMMANDS+1;i++)
@@ -244,7 +245,7 @@ void ActorSpawner::InitializeRig()
     }
 
     m_actor->exhausts.clear();
-    memset(m_actor->ar_custom_particles, 0, sizeof(cparticle_t) * MAX_CPARTICLES);
+    memset(m_actor->ar_custom_particles, 0, sizeof(CParticle) * MAX_CPARTICLES);
     m_actor->ar_num_custom_particles = 0;
     memset(m_actor->ar_soundsources, 0, sizeof(soundsource_t) * MAX_SOUNDSCRIPTS_PER_TRUCK);
     m_actor->ar_num_soundsources = 0;
@@ -259,7 +260,6 @@ void ActorSpawner::InitializeRig()
     m_actor->description.clear();
 
     m_actor->ar_extern_camera_mode=0;
-    m_actor->ar_extern_camera_node=-1;
     m_actor->authors.clear();
 
     m_actor->m_odometer_total = 0;
@@ -267,15 +267,11 @@ void ActorSpawner::InitializeRig()
 
     m_actor->m_masscount=0;
     m_actor->m_disable_smoke = App::gfx_particles_mode->GetInt() == 0;
-    m_actor->ar_exhaust_pos_node=0;
-    m_actor->ar_exhaust_dir_node=0;
     m_actor->m_beam_break_debug_enabled  = App::diag_log_beam_break->GetBool();
     m_actor->m_beam_deform_debug_enabled = App::diag_log_beam_deform->GetBool();
     m_actor->m_trigger_debug_enabled    = App::diag_log_beam_trigger->GetBool();
     m_actor->ar_origin=Ogre::Vector3::ZERO;
     m_actor->m_slidenodes.clear();
-
-    m_actor->ar_cinecam_node[0]=-1;
     m_actor->ar_num_cinecams=0;
     m_actor->m_deletion_scene_nodes.clear();
     m_actor->m_net_custom_lights[0] = UINT_MAX;
@@ -296,9 +292,12 @@ void ActorSpawner::InitializeRig()
 
     m_actor->ar_speedo_max_kph=140;
     m_actor->ar_num_cameras=0;
-    m_actor->ar_camera_node_pos[0]=-1;
-    m_actor->ar_camera_node_dir[0]=-1;
-    m_actor->ar_camera_node_roll[0]=-1;
+    for (int i = 0; i < MAX_CAMERAS; ++i)
+    {
+        m_actor->ar_camera_node_pos [i] = node_t::INVALID_IDX;
+        m_actor->ar_camera_node_dir [i] = node_t::INVALID_IDX;
+        m_actor->ar_camera_node_roll[i] = node_t::INVALID_IDX;
+    }
 
 #ifdef USE_ANGELSCRIPT
     m_actor->ar_vehicle_ai = new VehicleAI(m_actor);
@@ -379,10 +378,20 @@ void ActorSpawner::InitializeRig()
 
     m_curr_mirror_prop_type = CustomMaterial::MirrorPropType::MPROP_NONE;
     m_curr_mirror_prop_scenenode = nullptr;
+
+    m_generate_wing_position_lights = true;
+    for (auto module: m_selected_modules)
+    {
+        if (module->engine.size() > 0) // Engine present => it's a land vehicle.
+            m_generate_wing_position_lights = false; // Disable aerial pos. lights for land vehicles.
+    }
 }
 
 void ActorSpawner::FinalizeRig()
 {
+    m_actor->m_dry_mass = m_state.truckmass;
+    m_actor->m_load_mass = m_state.loadmass;
+
     // we should post-process the torque curve if existing
     if (m_actor->ar_engine)
     {
@@ -424,11 +433,18 @@ void ActorSpawner::FinalizeRig()
         }
     }
 
-    m_actor->ar_main_camera_node_pos  = std::max(0, m_actor->ar_camera_node_pos[0]);
-    m_actor->ar_main_camera_node_dir  = std::max(0, m_actor->ar_camera_node_dir[0]);
-    m_actor->ar_main_camera_node_roll = std::max(0, m_actor->ar_camera_node_roll[0]);
+    m_actor->ar_main_camera_node_pos  = std::max((NodeIdx_t)0, m_actor->ar_camera_node_pos[0]);
+    m_actor->ar_main_camera_node_dir  = std::max((NodeIdx_t)0, m_actor->ar_camera_node_dir[0]);
+    m_actor->ar_main_camera_node_roll = std::max((NodeIdx_t)0, m_actor->ar_camera_node_roll[0]);
     
     m_actor->m_has_axles_section = m_actor->m_num_wheel_diffs > 0;
+
+    // Fill global 'minimass' value where 'set_default_minimass' value wasn't set.
+    for (int i = 0; i < m_actor->ar_num_nodes; i++)
+    {
+        if (m_actor->ar_minimass[i] == -1.f)
+            m_actor->ar_minimass[i] = m_state.global_minimass;
+    }
 
     // Calculate mass of each wheel (without rim)
     for (int i = 0; i < m_actor->ar_num_wheels; i++)
@@ -511,19 +527,19 @@ void ActorSpawner::FinalizeRig()
         m_actor->m_axle_diffs[m_actor->m_num_axle_diffs] = diff;
     }
 
-    if (m_actor->ar_main_camera_node_dir == 0)
+    if (m_actor->ar_main_camera_node_dir == 0 || m_actor->ar_main_camera_node_dir == node_t::INVALID_IDX)
     {
         Ogre::Vector3 ref = m_actor->ar_nodes[m_actor->ar_main_camera_node_pos].RelPosition;
         // Step 1: Find a suitable camera node dir
         float max_dist = 0.0f;
-        int furthest_node = 0;
+        NodeIdx_t furthest_node = 0;
         for (int i = 0; i < m_actor->ar_num_nodes; i++)
         {
             float dist = m_actor->ar_nodes[i].RelPosition.squaredDistance(ref);
             if (dist > max_dist)
             {
                 max_dist = dist;
-                furthest_node = i;
+                furthest_node = (NodeIdx_t)i;
             }
         }
         m_actor->ar_main_camera_node_dir = furthest_node;
@@ -533,7 +549,7 @@ void ActorSpawner::FinalizeRig()
         m_actor->ar_main_camera_dir_corr = Ogre::Quaternion(Ogre::Radian(offset), Ogre::Vector3::UNIT_Y);
     }
 
-    if (m_actor->ar_camera_node_pos[0] > 0)
+    if (m_actor->ar_camera_node_pos[0] != node_t::INVALID_IDX)
     {
         // store the y-difference between the trucks lowest node and the campos-node for the gwps system
         m_actor->ar_posnode_spawn_height = m_actor->ar_nodes[m_actor->ar_camera_node_pos[0]].RelPosition.y - m_actor->ar_posnode_spawn_height;
@@ -637,9 +653,9 @@ void ActorSpawner::WashCalculator()
     }
 }
 
-void ActorSpawner::ProcessTurbojet(RigDef::Turbojet & def)
+void ActorSpawner::ProcessTurbojet(Truck::Turbojet & def)
 {
-    int front,back,ref;
+    NodeIdx_t front,back,ref;
     front = GetNodeIndexOrThrow(def.front_node);
     back  = GetNodeIndexOrThrow(def.back_node);
     ref   = GetNodeIndexOrThrow(def.side_node);
@@ -686,33 +702,28 @@ void ActorSpawner::ComposeName(RoR::Str<100>& str, const char* type, int number,
     str << type << "_" << number << ACTOR_ID_TOKEN << actor_id;
 }
 
-void ActorSpawner::ProcessScrewprop(RigDef::Screwprop & def)
+void ActorSpawner::ProcessScrewprop(Truck::Screwprop & def)
 {
     if (! CheckScrewpropLimit(1))
     {
         return;
     }
 
-    int ref_node_idx = GetNodeIndexOrThrow(def.prop_node);
-    int back_node_idx = GetNodeIndexOrThrow(def.back_node);
-    int top_node_idx = GetNodeIndexOrThrow(def.top_node);
-
     m_actor->ar_screwprops[m_actor->ar_num_screwprops] = new Screwprop(
-        m_actor->ar_nodes,
-        ref_node_idx,
-        back_node_idx,
-        top_node_idx,
-        def.power,
-        m_actor->ar_instance_id
+        m_actor,
+        GetNodeIndexOrThrow(def.prop_node),
+        GetNodeIndexOrThrow(def.back_node),
+        GetNodeIndexOrThrow(def.top_node),
+        def.power
     );
     m_actor->ar_driveable=BOAT;
     m_actor->ar_num_screwprops++;
 }
 
-void ActorSpawner::ProcessFusedrag(RigDef::Fusedrag & def)
+void ActorSpawner::ProcessFusedrag(Truck::Fusedrag & def)
 {
     //parse fusedrag
-    int front_node_idx = GetNodeIndexOrThrow(def.front_node);
+    NodeIdx_t front_node_idx = GetNodeIndexOrThrow(def.front_node);
     float width = 1.f;
     float factor = 1.f;
     char fusefoil[256];
@@ -747,14 +758,14 @@ void ActorSpawner::ProcessFusedrag(RigDef::Fusedrag & def)
     }
 }
 
-void ActorSpawner::BuildAerialEngine(
-    int ref_node_index,
-    int back_node_index,
-    int blade_1_node_index,
-    int blade_2_node_index,
-    int blade_3_node_index,
-    int blade_4_node_index,
-    int couplenode_index,
+void ActorSpawner::BuildAeroEngine(
+    NodeIdx_t ref_node_index,
+    NodeIdx_t back_node_index,
+    NodeIdx_t blade_1_node_index,
+    NodeIdx_t blade_2_node_index,
+    NodeIdx_t blade_3_node_index,
+    NodeIdx_t blade_4_node_index,
+    NodeIdx_t couplenode_index,
     bool is_turboprops,
     Ogre::String const & airfoil,
     float power,
@@ -764,8 +775,7 @@ void ActorSpawner::BuildAerialEngine(
     int aeroengine_index = m_actor->ar_num_aeroengines;
 
     Turboprop *turbo_prop = new Turboprop(
-        this->ComposeName("Turboprop", aeroengine_index).c_str(),
-        m_actor->ar_nodes, 
+        m_actor, 
         ref_node_index,
         back_node_index,
         blade_1_node_index,
@@ -775,8 +785,6 @@ void ActorSpawner::BuildAerialEngine(
         couplenode_index,
         power,
         airfoil,
-        m_actor->ar_num_aeroengines,
-        m_actor->ar_instance_id,
         m_actor->m_disable_smoke,
         ! is_turboprops,
         pitch
@@ -804,13 +812,13 @@ void ActorSpawner::BuildAerialEngine(
     }
 }
 
-void ActorSpawner::ProcessTurboprop2(RigDef::Turboprop2 & def)
+void ActorSpawner::ProcessTurboprop2(Truck::Turboprop2 & def)
 {
-    int p3_node_index = (def.blade_tip_nodes[2].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[2]) : -1;
-    int p4_node_index = (def.blade_tip_nodes[3].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[3]) : -1;
-    int couple_node_index = (def.couple_node.IsValidAnyState()) ? GetNodeIndexOrThrow(def.couple_node) : -1;
+    const NodeIdx_t p3_node_index = (def.blade_tip_nodes[2].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[2]) : -1;
+    const NodeIdx_t p4_node_index = (def.blade_tip_nodes[3].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[3]) : -1;
+    const NodeIdx_t couple_node_index = (def.couple_node.IsValidAnyState()) ? GetNodeIndexOrThrow(def.couple_node) : -1;
 
-    BuildAerialEngine(
+    BuildAeroEngine(
         GetNodeIndexOrThrow(def.reference_node),
         GetNodeIndexOrThrow(def.axis_node),
         GetNodeIndexOrThrow(def.blade_tip_nodes[0]),
@@ -825,13 +833,13 @@ void ActorSpawner::ProcessTurboprop2(RigDef::Turboprop2 & def)
     );
 }
 
-void ActorSpawner::ProcessPistonprop(RigDef::Pistonprop & def)
+void ActorSpawner::ProcessPistonprop(Truck::Pistonprop & def)
 {
-    int p3_node_index = (def.blade_tip_nodes[2].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[2]) : -1;
-    int p4_node_index = (def.blade_tip_nodes[3].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[3]) : -1;
-    int couple_node_index = (def.couple_node.IsValidAnyState()) ? GetNodeIndexOrThrow(def.couple_node) : -1;
+    const NodeIdx_t p3_node_index = (def.blade_tip_nodes[2].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[2]) : -1;
+    const NodeIdx_t p4_node_index = (def.blade_tip_nodes[3].IsValidAnyState()) ? GetNodeIndexOrThrow(def.blade_tip_nodes[3]) : -1;
+    const NodeIdx_t couple_node_index = (def.couple_node.IsValidAnyState()) ? GetNodeIndexOrThrow(def.couple_node) : -1;
 
-    BuildAerialEngine(
+    BuildAeroEngine(
         GetNodeIndexOrThrow(def.reference_node),
         GetNodeIndexOrThrow(def.axis_node),
         GetNodeIndexOrThrow(def.blade_tip_nodes[0]),
@@ -846,7 +854,40 @@ void ActorSpawner::ProcessPistonprop(RigDef::Pistonprop & def)
     );
 }
 
-void ActorSpawner::ProcessAirbrake(RigDef::Airbrake & def)
+void ActorSpawner::EvaluateSectionConfig()
+{
+    for (Truck::ModulePtr m: m_file->modules)
+    {
+        if (!m->defined_explicitly || m->sectionconfigs.size() == 0)
+        {
+            m_selected_modules.push_back(m);
+        }
+        else
+        {
+            for (std::string const& config: m->sectionconfigs)
+            {
+                if (config == m_selected_config)
+                {
+                    m_selected_modules.push_back(m);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void ActorSpawner::ValidateSectionConfig()
+{
+    Truck::Validator v;
+    v.Setup(m_file);
+    for (Truck::ModulePtr& modul: m_selected_modules)
+    {
+        v.AddModule(modul);
+    }
+    v.Validate(); // Reports issues to console
+}
+
+void ActorSpawner::ProcessAirbrake(Truck::Airbrake & def)
 {
     const int airbrake_idx = static_cast<int>(m_actor->ar_airbrakes.size());
     m_actor->ar_airbrakes.push_back(new Airbrake(
@@ -870,7 +911,7 @@ void ActorSpawner::ProcessAirbrake(RigDef::Airbrake & def)
     ));
 }
 
-void ActorSpawner::ProcessWing(RigDef::Wing & def)
+void ActorSpawner::ProcessWing(Truck::Wing & def)
 {
     if ((m_first_wing_index != -1) && (m_actor->ar_wings[m_actor->ar_num_wings - 1].fa == nullptr))
     {
@@ -884,25 +925,20 @@ void ActorSpawner::ProcessWing(RigDef::Wing & def)
         return;
     }
 
-    // Create airfoil
-    int node_indices[8];
-    for (unsigned int i = 0; i < 8; i++)
-    {
-        node_indices[i] = this->GetNodeIndexOrThrow(def.nodes[i]);
-    }
+    NodeIdx_t node1 = this->GetNodeIndexOrThrow(def.nodes[1]);
 
     const std::string wing_name = this->ComposeName("Wing", m_actor->ar_num_wings);
     auto flex_airfoil = new FlexAirfoil(
         wing_name,
         m_actor,
-        node_indices[0],
-        node_indices[1],
-        node_indices[2],
-        node_indices[3],
-        node_indices[4],
-        node_indices[5],
-        node_indices[6],
-        node_indices[7],
+        this->GetNodeIndexOrThrow(def.nodes[0]),
+        node1,
+        this->GetNodeIndexOrThrow(def.nodes[2]),
+        this->GetNodeIndexOrThrow(def.nodes[3]),
+        this->GetNodeIndexOrThrow(def.nodes[4]),
+        this->GetNodeIndexOrThrow(def.nodes[5]),
+        this->GetNodeIndexOrThrow(def.nodes[6]),
+        this->GetNodeIndexOrThrow(def.nodes[7]),
         m_cab_material_name,
         Ogre::Vector2(def.tex_coords[0], def.tex_coords[1]),
         Ogre::Vector2(def.tex_coords[2], def.tex_coords[3]),
@@ -945,7 +981,7 @@ void ActorSpawner::ProcessWing(RigDef::Wing & def)
     {
         wing_t & previous_wing = m_actor->ar_wings[m_actor->ar_num_wings - 1];
 
-        if (node_indices[1] != previous_wing.fa->nfld)
+        if (node1 != previous_wing.fa->nfld)
         {
             wing_t & start_wing    = m_actor->ar_wings[m_first_wing_index];
 
@@ -1117,11 +1153,11 @@ float ActorSpawner::ComputeWingArea(Ogre::Vector3 const & ref, Ogre::Vector3 con
     return (((x-ref).crossProduct(y-ref)).length()+((x-aref).crossProduct(y-aref)).length())*0.5f;
 }
 
-void ActorSpawner::ProcessSoundSource2(RigDef::SoundSource2 & def)
+void ActorSpawner::ProcessSoundSource2(Truck::SoundSource2 & def)
 {
 #ifdef USE_OPENAL
-    int mode = (def.mode == RigDef::SoundSource2::MODE_CINECAM) ? def.cinecam_index : def.mode;
-    int node_index = FindNodeIndex(def.node);
+    int mode = (def.mode == Truck::SoundSource2::MODE_CINECAM) ? def.cinecam_index : def.mode;
+    NodeIdx_t node_index = FindNodeIndex(def.node);
     if (node_index == -1)
     {
         return;
@@ -1138,11 +1174,11 @@ void ActorSpawner::ProcessSoundSource2(RigDef::SoundSource2 & def)
 void ActorSpawner::AddSoundSourceInstance(Actor *vehicle, Ogre::String const & sound_script_name, int node_index, int type)
 {
 #ifdef USE_OPENAL
-    AddSoundSource(vehicle, App::GetSoundScriptManager()->createInstance(sound_script_name, vehicle->ar_instance_id, nullptr), node_index);
+    AddSoundSource(vehicle, App::GetSoundScriptManager()->createInstance(sound_script_name, vehicle->ar_instance_id, nullptr), (NodeIdx_t)node_index);
 #endif // USE_OPENAL
 }
 
-void ActorSpawner::AddSoundSource(Actor *vehicle, SoundScriptInstance *sound_script, int node_index, int type)
+void ActorSpawner::AddSoundSource(Actor *vehicle, SoundScriptInstance *sound_script, NodeIdx_t node_index, int type)
 {
     if (! CheckSoundScriptLimit(vehicle, 1))
     {
@@ -1160,7 +1196,7 @@ void ActorSpawner::AddSoundSource(Actor *vehicle, SoundScriptInstance *sound_scr
     vehicle->ar_num_soundsources++;
 }
 
-void ActorSpawner::ProcessSoundSource(RigDef::SoundSource & def)
+void ActorSpawner::ProcessSoundSource(Truck::SoundSource & def)
 {
 #ifdef USE_OPENAL
     AddSoundSource(
@@ -1172,7 +1208,7 @@ void ActorSpawner::ProcessSoundSource(RigDef::SoundSource & def)
 #endif // USE_OPENAL
 }
 
-void ActorSpawner::ProcessCameraRail(RigDef::CameraRail & def)
+void ActorSpawner::ProcessCameraRail(Truck::CameraRail & def)
 {
     auto itor = def.nodes.begin();
     auto end  = def.nodes.end();
@@ -1187,7 +1223,7 @@ void ActorSpawner::ProcessCameraRail(RigDef::CameraRail & def)
     }
 }
 
-void ActorSpawner::ProcessExtCamera(RigDef::ExtCamera & def)
+void ActorSpawner::ProcessExtCamera(Truck::ExtCamera & def)
 {
     m_actor->ar_extern_camera_mode = def.mode;
     if (def.node.IsValidAnyState())
@@ -1196,13 +1232,13 @@ void ActorSpawner::ProcessExtCamera(RigDef::ExtCamera & def)
     }
 }
 
-void ActorSpawner::ProcessGuiSettings(RigDef::GuiSettings & def)
+void ActorSpawner::ProcessGuiSettings(Truck::GuiSettings & def)
 {
     // Currently unused (was relevant to overlay-based HUD): def.tacho_material; def.speedo_material;
 
     if (! def.help_material.empty())
     {
-        m_help_material_name = def.help_material;
+        m_state.helpmat = def.help_material;
     }
     if (def.speedo_highest_kph > 10 && def.speedo_highest_kph < 32000)
     {
@@ -1213,27 +1249,27 @@ void ActorSpawner::ProcessGuiSettings(RigDef::GuiSettings & def)
         std::stringstream msg;
         msg << "Invalid 'speedo_highest_kph' value (" << def.speedo_highest_kph << "), allowed range is <10 -32000>. Falling back to default...";
         AddMessage(Message::TYPE_ERROR, msg.str());
-        m_actor->ar_speedo_max_kph = RigDef::GuiSettings::DEFAULT_SPEEDO_MAX;
+        m_actor->ar_speedo_max_kph = 140;
     }
     m_actor->ar_gui_use_engine_max_rpm = def.use_max_rpm;  /* Handles default */
 
     // NOTE: Dashboard layouts are processed later
 }
 
-void ActorSpawner::ProcessFixedNode(RigDef::Node::Ref node_ref)
+void ActorSpawner::ProcessFixedNode(Truck::Node::Ref node_ref)
 {
     node_t & node = GetNodeOrThrow(node_ref);
     node.nd_immovable = true;
 }
 
-void ActorSpawner::ProcessExhaust(RigDef::Exhaust & def)
+void ActorSpawner::ProcessExhaust(Truck::Exhaust & def)
 {
     if (m_actor->m_disable_smoke)
     {
         return;
     }
 
-    exhaust_t exhaust;
+    Exhaust exhaust;
     exhaust.emitterNode   = this->GetNodeIndexOrThrow(def.reference_node);
     exhaust.directionNode = this->GetNodeIndexOrThrow(def.direction_node);
 
@@ -1269,227 +1305,31 @@ void ActorSpawner::ProcessExhaust(RigDef::Exhaust & def)
     m_actor->exhausts.push_back(exhaust);
 }
 
-std::string ActorSpawner::GetSubmeshGroundmodelName()
+void ActorSpawner::ProcessFlexbodyForset(int pos)
 {
-    auto module_itor = m_selected_modules.begin();
-    auto module_end  = m_selected_modules.end();
-    for (; module_itor != module_end; ++module_itor)
+    Truck::Flexbody* def = &m_cur_module->flexbodies[m_next_flexbody];
+    m_next_flexbody = -1;
+
+    std::vector<NodeIdx_t> nodes;
+    for (Truck::Node::Range range: m_cur_module->forset[pos])
     {
-        if (! module_itor->get()->submeshes_ground_model_name.empty())
+        auto start_res = this->GetNodeIndex(range.start);
+        auto end_res = this->GetNodeIndex(range.end);
+        if (!start_res.second || !end_res.second)
         {
-            return module_itor->get()->submeshes_ground_model_name;
-        }
-    }
-    return std::string();
-};
-
-void ActorSpawner::ProcessSubmesh(RigDef::Submesh & def)
-{
-    if (! CheckSubmeshLimit(1))
-    {
-        return;
-    }
-
-    /* TEXCOORDS */
-
-    std::vector<RigDef::Texcoord>::iterator texcoord_itor = def.texcoords.begin();
-    for ( ; texcoord_itor != def.texcoords.end(); texcoord_itor++)
-    {
-        if (! CheckTexcoordLimit(1))
-        {
-            break;
-        }
-
-        CabTexcoord texcoord;
-        texcoord.node_id    = GetNodeIndexOrThrow(texcoord_itor->node);
-        texcoord.texcoord_u = texcoord_itor->u;
-        texcoord.texcoord_v = texcoord_itor->v;
-        m_oldstyle_cab_texcoords.push_back(texcoord);
-    }
-
-    /* CAB */
-
-    auto cab_itor = def.cab_triangles.begin();
-    auto cab_itor_end = def.cab_triangles.end();
-    for ( ; cab_itor != cab_itor_end; ++cab_itor)
-    {
-        if (! CheckCabLimit(1))
-        {
-            return;
-        }
-        else if (m_actor->ar_num_collcabs >= MAX_CABS)
-        {
-            std::stringstream msg;
-            msg << "Collcab limit (" << MAX_CABS << ") exceeded";
-            AddMessage(Message::TYPE_ERROR, msg.str());
+            this->AddMessage(Message::TYPE_ERROR, "Failed to collect nodes from node-ranges, skipping flexbody: " + def->mesh_name);
             return;
         }
 
-        bool mk_buoyance = false;
-
-        m_actor->ar_cabs[m_actor->ar_num_cabs*3]=GetNodeIndexOrThrow(cab_itor->nodes[0]);
-        m_actor->ar_cabs[m_actor->ar_num_cabs*3+1]=GetNodeIndexOrThrow(cab_itor->nodes[1]);
-        m_actor->ar_cabs[m_actor->ar_num_cabs*3+2]=GetNodeIndexOrThrow(cab_itor->nodes[2]);
-
-        // TODO: Clean this up properly ~ ulteq 10/2018
-        if (BITMASK_IS_1(cab_itor->options, RigDef::Cab::OPTION_c_CONTACT) ||
-            BITMASK_IS_1(cab_itor->options, RigDef::Cab::OPTION_p_10xTOUGHER) ||
-            BITMASK_IS_1(cab_itor->options, RigDef::Cab::OPTION_u_INVULNERABLE))
+        for (NodeIdx_t i = start_res.first; i != end_res.first; ++i)
         {
-            m_actor->ar_collcabs[m_actor->ar_num_collcabs]=m_actor->ar_num_cabs;
-            m_actor->ar_num_collcabs++;
+            nodes.push_back(i);
         }
-        if (BITMASK_IS_1(cab_itor->options, RigDef::Cab::OPTION_b_BUOYANT))
-        {
-            m_actor->ar_buoycabs[m_actor->ar_num_buoycabs]=m_actor->ar_num_cabs; 
-            m_actor->ar_buoycab_types[m_actor->ar_num_buoycabs]=Buoyance::BUOY_NORMAL; 
-            m_actor->ar_num_buoycabs++;   
-            mk_buoyance = true;
-        }
-        if (BITMASK_IS_1(cab_itor->options, RigDef::Cab::OPTION_r_BUOYANT_ONLY_DRAG))
-        {
-            m_actor->ar_buoycabs[m_actor->ar_num_buoycabs]=m_actor->ar_num_cabs; 
-            m_actor->ar_buoycab_types[m_actor->ar_num_buoycabs]=Buoyance::BUOY_DRAGONLY; 
-            m_actor->ar_num_buoycabs++; 
-            mk_buoyance = true;
-        }
-        if (BITMASK_IS_1(cab_itor->options, RigDef::Cab::OPTION_s_BUOYANT_NO_DRAG))
-        {
-            m_actor->ar_buoycabs[m_actor->ar_num_buoycabs]=m_actor->ar_num_cabs; 
-            m_actor->ar_buoycab_types[m_actor->ar_num_buoycabs]=Buoyance::BUOY_DRAGLESS; 
-            m_actor->ar_num_buoycabs++; 
-            mk_buoyance = true;
-        }
-
-        if (cab_itor->GetOption_D_ContactBuoyant() ||
-            cab_itor->GetOption_F_10xTougherBuoyant() ||
-            cab_itor->GetOption_S_UnpenetrableBuoyant())
-        {
-
-            if (m_actor->ar_num_collcabs >= MAX_CABS)
-            {
-                std::stringstream msg;
-                msg << "Collcab limit (" << MAX_CABS << ") exceeded";
-                AddMessage(Message::TYPE_ERROR, msg.str());
-                return;
-            }
-            else if (m_actor->ar_num_buoycabs >= MAX_CABS)
-            {
-                std::stringstream msg;
-                msg << "Buoycab limit (" << MAX_CABS << ") exceeded";
-                AddMessage(Message::TYPE_ERROR, msg.str());
-                return;
-            }
-
-            m_actor->ar_collcabs[m_actor->ar_num_collcabs]=m_actor->ar_num_cabs;
-            m_actor->ar_num_collcabs++;
-            m_actor->ar_buoycabs[m_actor->ar_num_buoycabs]=m_actor->ar_num_cabs; 
-            m_actor->ar_buoycab_types[m_actor->ar_num_buoycabs]=Buoyance::BUOY_NORMAL; 
-            m_actor->ar_num_buoycabs++; 
-            mk_buoyance = true;
-        }
-
-        if (mk_buoyance && (m_actor->m_buoyance == nullptr))
-        {
-            Buoyance* buoy = new Buoyance(App::GetGfxScene()->GetDustPool("splash"), App::GetGfxScene()->GetDustPool("ripple"));
-            m_actor->m_buoyance.reset(buoy);
-        }
-        m_actor->ar_num_cabs++;
     }
 
-    //close the current mesh
-    CabSubmesh submesh;
-    submesh.texcoords_pos = m_oldstyle_cab_texcoords.size();
-    submesh.cabs_pos = static_cast<unsigned int>(m_actor->ar_num_cabs);
-    submesh.backmesh_type = CabSubmesh::BACKMESH_NONE;
-    m_oldstyle_cab_submeshes.push_back(submesh);
-
-    /* BACKMESH */
-
-    if (def.backmesh)
-    {
-
-        // Check limit
-        if (! CheckCabLimit(1))
-        {
-            return;
-        }
-
-        // === add an extra front mesh ===
-        //texcoords
-        int uv_start = (m_oldstyle_cab_submeshes.size()==1) ? 0 : static_cast<int>((m_oldstyle_cab_submeshes.rbegin()+1)->texcoords_pos);
-        for (size_t i=uv_start; i<m_oldstyle_cab_submeshes.back().texcoords_pos; i++)
-        {
-            m_oldstyle_cab_texcoords.push_back(m_oldstyle_cab_texcoords[i]);
-        }
-        //cab
-        int cab_start =  (m_oldstyle_cab_submeshes.size()==1) ? 0 : static_cast<int>((m_oldstyle_cab_submeshes.rbegin()+1)->cabs_pos);
-        for (size_t i=cab_start; i<m_oldstyle_cab_submeshes.back().cabs_pos; i++)
-        {
-            m_actor->ar_cabs[m_actor->ar_num_cabs*3]=m_actor->ar_cabs[i*3];
-            m_actor->ar_cabs[m_actor->ar_num_cabs*3+1]=m_actor->ar_cabs[i*3+1];
-            m_actor->ar_cabs[m_actor->ar_num_cabs*3+2]=m_actor->ar_cabs[i*3+2];
-            m_actor->ar_num_cabs++;
-        }
-        // Finalize
-        CabSubmesh submesh;
-        submesh.backmesh_type = CabSubmesh::BACKMESH_TRANSPARENT;
-        submesh.texcoords_pos = m_oldstyle_cab_texcoords.size();
-        submesh.cabs_pos      = static_cast<unsigned int>(m_actor->ar_num_cabs);
-        m_oldstyle_cab_submeshes.push_back(submesh);
-
-        // === add an extra back mesh ===
-        //texcoords
-        uv_start = (m_oldstyle_cab_submeshes.size()==1) ? 0 : static_cast<int>((m_oldstyle_cab_submeshes.rbegin()+1)->texcoords_pos);
-        for (size_t i=uv_start; i<m_oldstyle_cab_submeshes.back().texcoords_pos; i++)
-        {
-            m_oldstyle_cab_texcoords.push_back(m_oldstyle_cab_texcoords[i]);
-        }
-
-        //cab
-        cab_start =  (m_oldstyle_cab_submeshes.size()==1) ? 0 : static_cast<int>((m_oldstyle_cab_submeshes.rbegin()+1)->cabs_pos);
-        for (size_t i=cab_start; i<m_oldstyle_cab_submeshes.back().cabs_pos; i++)
-        {
-            m_actor->ar_cabs[m_actor->ar_num_cabs*3]=m_actor->ar_cabs[i*3+1];
-            m_actor->ar_cabs[m_actor->ar_num_cabs*3+1]=m_actor->ar_cabs[i*3];
-            m_actor->ar_cabs[m_actor->ar_num_cabs*3+2]=m_actor->ar_cabs[i*3+2];
-            m_actor->ar_num_cabs++;
-        }
-    
-        //close the current mesh
-        CabSubmesh submesh2;
-        submesh2.texcoords_pos = m_oldstyle_cab_texcoords.size();
-        submesh2.cabs_pos = static_cast<unsigned int>(m_actor->ar_num_cabs);
-        submesh2.backmesh_type = CabSubmesh::BACKMESH_OPAQUE;
-        m_oldstyle_cab_submeshes.push_back(submesh2);
-    }
-}
-
-void ActorSpawner::ProcessFlexbody(std::shared_ptr<RigDef::Flexbody> def)
-{
-    // Collect nodes
-    std::vector<unsigned int> node_indices;
-    bool nodes_found = true;
-    for (auto& node_def: def->node_list)
-    {
-        auto result = this->GetNodeIndex(node_def);
-        if (!result.second)
-        {
-            nodes_found = false;
-            break;
-        }
-        node_indices.push_back(result.first);
-    }
-
-    if (! nodes_found)
-    {
-        this->AddMessage(Message::TYPE_ERROR, "Failed to collect nodes from node-ranges, skipping flexbody: " + def->mesh_name);
-        return;
-    }
-
-    const int reference_node = this->FindNodeIndex(def->reference_node);
-    const int x_axis_node    = this->FindNodeIndex(def->x_axis_node);
-    const int y_axis_node    = this->FindNodeIndex(def->y_axis_node);
+    const NodeIdx_t reference_node = this->FindNodeIndex(def->reference_node);
+    const NodeIdx_t x_axis_node    = this->FindNodeIndex(def->x_axis_node);
+    const NodeIdx_t y_axis_node    = this->FindNodeIndex(def->y_axis_node);
     if (reference_node == -1 || x_axis_node == -1 || y_axis_node == -1)
     {
         this->AddMessage(Message::TYPE_ERROR, "Failed to find required nodes, skipping flexbody '" + def->mesh_name + "'");
@@ -1503,16 +1343,12 @@ void ActorSpawner::ProcessFlexbody(std::shared_ptr<RigDef::Flexbody> def)
     try
     {
         auto* flexbody = m_flex_factory.CreateFlexBody(
-            def.get(), reference_node, x_axis_node, y_axis_node, rot, node_indices, m_custom_resource_group);
+            def, reference_node, x_axis_node, y_axis_node, rot, nodes, m_custom_resource_group);
 
         if (flexbody == nullptr)
             return; // Error already logged
 
-        if (def->camera_settings.mode == RigDef::CameraSettings::MODE_CINECAM)
-            flexbody->setCameraMode(static_cast<int>(def->camera_settings.cinecam_index));
-        else
-            flexbody->setCameraMode(static_cast<int>(def->camera_settings.mode));
-
+        m_last_flexbody = flexbody;
         m_actor->GetGfxActor()->AddFlexbody(flexbody);
     }
     catch (Ogre::Exception& e)
@@ -1522,7 +1358,7 @@ void ActorSpawner::ProcessFlexbody(std::shared_ptr<RigDef::Flexbody> def)
     }
 }
 
-void ActorSpawner::ProcessProp(RigDef::Prop & def)
+void ActorSpawner::ProcessProp(Truck::Prop & def)
 {
     RoR::Prop prop;
     int prop_index = static_cast<int>(m_props.size());
@@ -1540,30 +1376,29 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
                            * Ogre::Quaternion(Ogre::Degree(def.rotation.y), Ogre::Vector3::UNIT_Y)
                            * Ogre::Quaternion(Ogre::Degree(def.rotation.x), Ogre::Vector3::UNIT_X);
     prop.pp_rota         = def.rotation;
-    prop.pp_camera_mode      = def.camera_settings.mode; /* Handles default value */
     prop.pp_wheel_rot_degree  = 160.f; // ??
 
     /* SPECIAL PROPS */
 
     /* Rear view mirror (left) */
-    if (def.special == RigDef::Prop::SPECIAL_MIRROR_LEFT)
+    if (def.special == Truck::Prop::SPECIAL_MIRROR_LEFT)
     {
         m_curr_mirror_prop_type = CustomMaterial::MirrorPropType::MPROP_LEFT;
     }
 
     /* Rear view mirror (right) */
-    if (def.special == RigDef::Prop::SPECIAL_MIRROR_RIGHT)
+    if (def.special == Truck::Prop::SPECIAL_MIRROR_RIGHT)
     {
         m_curr_mirror_prop_type = CustomMaterial::MirrorPropType::MPROP_RIGHT;
     }
 
     /* Custom steering wheel */
     Ogre::Vector3 steering_wheel_offset = Ogre::Vector3::ZERO;
-    if (def.special == RigDef::Prop::SPECIAL_DASHBOARD_LEFT)
+    if (def.special == Truck::Prop::SPECIAL_DASHBOARD_LEFT)
     {
         steering_wheel_offset = Ogre::Vector3(-0.67, -0.61,0.24);
     }
-    if (def.special == RigDef::Prop::SPECIAL_DASHBOARD_RIGHT)
+    if (def.special == Truck::Prop::SPECIAL_DASHBOARD_RIGHT)
     {
         steering_wheel_offset = Ogre::Vector3(0.67, -0.61,0.24);
     }
@@ -1593,17 +1428,17 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
     prop.pp_mesh_obj = new MeshObject(def.mesh_name, m_custom_resource_group, instance_name, prop.pp_scene_node);
     prop.pp_mesh_obj->setCastShadows(true); // Orig code {{ prop.pp_mesh_obj->setCastShadows(shadowmode != 0); }}, shadowmode has default value 1 and changes with undocumented directive 'set_shadows'
 
-    if (def.special == RigDef::Prop::SPECIAL_AERO_PROP_SPIN)
+    if (def.special == Truck::Prop::SPECIAL_AERO_PROP_SPIN)
     {
         prop.pp_aero_propeller_spin = true;
         prop.pp_mesh_obj->setCastShadows(false);
         prop.pp_scene_node->setVisible(false);
     }
-    else if(def.special == RigDef::Prop::SPECIAL_AERO_PROP_BLADE)
+    else if(def.special == Truck::Prop::SPECIAL_AERO_PROP_BLADE)
     {
         prop.pp_aero_propeller_blade = true;
     }
-    else if(def.special == RigDef::Prop::SPECIAL_DRIVER_SEAT)
+    else if(def.special == Truck::Prop::SPECIAL_DRIVER_SEAT)
     {
         //driver seat, used to position the driver and make the seat translucent at times
         if (m_driverseat_prop_index == -1)
@@ -1616,7 +1451,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             this->AddMessage(Message::TYPE_INFO, "Found more than one 'seat[2]' special props. Only the first one will be the driver's seat.");
         }
     }
-    else if(def.special == RigDef::Prop::SPECIAL_DRIVER_SEAT_2)
+    else if(def.special == Truck::Prop::SPECIAL_DRIVER_SEAT_2)
     {
         // Same as DRIVER_SEAT, except it doesn't force the "driversseat" material
         if (m_driverseat_prop_index == -1)
@@ -1630,7 +1465,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
     }
     else if (m_actor->m_flares_mode != GfxFlaresMode::NONE)
     {
-        if(def.special == RigDef::Prop::SPECIAL_BEACON)
+        if(def.special == Truck::Prop::SPECIAL_BEACON)
         {
             prop.pp_beacon_type = 'b';
             prop.pp_beacon_rot_angle[0] = 2.0 * 3.14 * frand();
@@ -1661,7 +1496,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             prop.pp_beacon_bbs[0] = flare_billboard_sys;
             prop.pp_beacon_light[0] = pp_beacon_light;
         }
-        else if(def.special == RigDef::Prop::SPECIAL_REDBEACON)
+        else if(def.special == Truck::Prop::SPECIAL_REDBEACON)
         {
             prop.pp_beacon_rot_angle[0] = 0.f;
             prop.pp_beacon_rot_rate[0] = 1.0;
@@ -1693,7 +1528,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             prop.pp_beacon_bbs[0] = flare_billboard_sys;
             
         }
-        else if(def.special == RigDef::Prop::SPECIAL_LIGHTBAR)
+        else if(def.special == Truck::Prop::SPECIAL_LIGHTBAR)
         {
             m_actor->ar_is_police = true;
             prop.pp_beacon_type='p';
@@ -1754,7 +1589,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
 
     /* PROCESS ANIMATIONS */
 
-    for (RigDef::Animation& anim_def: def.animations)
+    for (Truck::Animation& anim_def: def.animations)
     {
         PropAnim anim;
         anim.animKeyState = -1.0f; // Orig: hardcoded in {add_animation}
@@ -1775,130 +1610,130 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
         anim.upper_limit = anim_def.upper_limit; /* Handles default */
 
         /* Arg #4: source */
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AIRSPEED)) { /* (NOTE: code formatting relaxed) */
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_AIRSPEED)) { /* (NOTE: code formatting relaxed) */
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AIRSPEED);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_VERTICAL_VELOCITY)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_VERTICAL_VELOCITY)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_VVI);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ALTIMETER_100K)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ALTIMETER_100K)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ALTIMETER);
             anim.animOpt3 = 1.f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ALTIMETER_10K)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ALTIMETER_10K)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ALTIMETER);
             anim.animOpt3 = 2.f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ALTIMETER_1K)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ALTIMETER_1K)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ALTIMETER);
             anim.animOpt3 = 3.f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ANGLE_OF_ATTACK)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ANGLE_OF_ATTACK)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AOA);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_FLAP)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_FLAP)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_FLAP);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AIR_BRAKE)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_AIR_BRAKE)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AIRBRAKE);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ROLL)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ROLL)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ROLL);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_PITCH)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_PITCH)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_PITCH);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_BRAKES)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_BRAKES)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_BRAKE);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ACCEL)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ACCEL)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ACCEL);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_CLUTCH)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_CLUTCH)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_CLUTCH);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SPEEDO)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_SPEEDO)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SPEEDO);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_TACHO)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_TACHO)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_TACHO);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_TURBO)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_TURBO)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_TURBO);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_PARKING)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_PARKING)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_PBRAKE);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SHIFT_LEFT_RIGHT)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_SHIFT_LEFT_RIGHT)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
             anim.animOpt3 = 1.0f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SHIFT_BACK_FORTH)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_SHIFT_BACK_FORTH)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
             anim.animOpt3 = 2.0f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SEQUENTIAL_SHIFT)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_SEQUENTIAL_SHIFT)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
             anim.animOpt3 = 3.0f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_SHIFTERLIN)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_SHIFTERLIN)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_SHIFTER);
             anim.animOpt3 = 4.0f;
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_TORQUE)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_TORQUE)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_TORQUE);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_HEADING)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_HEADING)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_HEADING);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_DIFFLOCK)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_DIFFLOCK)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_DIFFLOCK);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_STEERING_WHEEL)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_STEERING_WHEEL)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_STEERING);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AILERON)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_AILERON)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AILERONS);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_ELEVATOR)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_ELEVATOR)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ELEVATORS);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_AIR_RUDDER)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_AIR_RUDDER)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_ARUDDER);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_BOAT_RUDDER)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_BOAT_RUDDER)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_BRUDDER);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_BOAT_THROTTLE)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_BOAT_THROTTLE)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_BTHROTTLE);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_PERMANENT)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_PERMANENT)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_PERMANENT);
         }
-        if (BITMASK_IS_1(anim_def.source, RigDef::Animation::SOURCE_EVENT)) {
+        if (BITMASK_IS_1(anim_def.source, Truck::Animation::SOURCE_EVENT)) {
             BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_EVENT);
         }
         /* Motor-indexed sources */
-        std::list<RigDef::Animation::MotorSource>::iterator source_itor = anim_def.motor_sources.begin();
+        std::list<Truck::Animation::MotorSource>::iterator source_itor = anim_def.motor_sources.begin();
         for ( ; source_itor != anim_def.motor_sources.end(); source_itor++)
         {
-            if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_THROTTLE)) {
+            if (BITMASK_IS_1(source_itor->source, Truck::Animation::MotorSource::SOURCE_AERO_THROTTLE)) {
                 BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_THROTTLE);
                 anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
-            if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_RPM)) {
+            if (BITMASK_IS_1(source_itor->source, Truck::Animation::MotorSource::SOURCE_AERO_RPM)) {
                 BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_RPM);
                 anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
-            if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_TORQUE)) {
+            if (BITMASK_IS_1(source_itor->source, Truck::Animation::MotorSource::SOURCE_AERO_TORQUE)) {
                 BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AETORQUE);
                 anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
-            if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_PITCH)) {
+            if (BITMASK_IS_1(source_itor->source, Truck::Animation::MotorSource::SOURCE_AERO_PITCH)) {
                 BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AEPITCH);
                 anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
-            if (BITMASK_IS_1(source_itor->source, RigDef::Animation::MotorSource::SOURCE_AERO_STATUS)) {
+            if (BITMASK_IS_1(source_itor->source, Truck::Animation::MotorSource::SOURCE_AERO_STATUS)) {
                 BITMASK_SET_1(anim.animFlags, PROP_ANIM_FLAG_AESTATUS);
                 anim.animOpt3 = static_cast<float>(source_itor->motor);
             }
@@ -1909,22 +1744,22 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
         }
 
         /* Anim modes */
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_X)) {
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_ROTATION_X)) {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_ROTA_X);
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Y)) {
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_ROTATION_Y)) {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_ROTA_Y);
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Z)) {
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_ROTATION_Z)) {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_ROTA_Z);
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_X)) {
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_OFFSET_X)) {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_OFFSET_X);
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Y)) {
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_OFFSET_Y)) {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_OFFSET_Y);
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Z)) {
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_OFFSET_Z)) {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_OFFSET_Z);
         }
         if (anim.animMode == 0)
@@ -1932,7 +1767,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             AddMessage(Message::TYPE_ERROR, "Failed to identify animation mode");
         }
 
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_AUTO_ANIMATE)) 
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_AUTO_ANIMATE)) 
         {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_AUTOANIMATE);
 
@@ -1940,41 +1775,41 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
             const bool use_default_lower_limit = (anim_def.lower_limit == 0.f);
             const bool use_default_upper_limit = (anim_def.upper_limit == 0.f);
 
-            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_X)) {
+            if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_ROTATION_X)) {
                 anim.lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_def.lower_limit + prop.pp_rota.x);
                 anim.upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_def.upper_limit + prop.pp_rota.x);
             }
-            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Y)) {
+            if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_ROTATION_Y)) {
                 anim.lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_def.lower_limit + prop.pp_rota.y);
                 anim.upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_def.upper_limit + prop.pp_rota.y);
             }
-            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_ROTATION_Z)) {
+            if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_ROTATION_Z)) {
                 anim.lower_limit = (use_default_lower_limit) ? (-180.f) : (anim_def.lower_limit + prop.pp_rota.z);
                 anim.upper_limit = (use_default_upper_limit) ? ( 180.f) : (anim_def.upper_limit + prop.pp_rota.z);
             }
-            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_X)) {
+            if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_OFFSET_X)) {
                 anim.lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_def.lower_limit + prop.pp_offset_orig.x);
                 anim.upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_def.upper_limit + prop.pp_offset_orig.x);
             }
-            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Y)) {
+            if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_OFFSET_Y)) {
                 anim.lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_def.lower_limit + prop.pp_offset_orig.y);
                 anim.upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_def.upper_limit + prop.pp_offset_orig.y);
             }
-            if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_OFFSET_Z)) {
+            if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_OFFSET_Z)) {
                 anim.lower_limit = (use_default_lower_limit) ? (-10.f) : (anim_def.lower_limit + prop.pp_offset_orig.z);
                 anim.upper_limit = (use_default_upper_limit) ? ( 10.f) : (anim_def.upper_limit + prop.pp_offset_orig.z);
             }
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_NO_FLIP)) 
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_NO_FLIP)) 
         {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_NOFLIP);
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_BOUNCE)) 
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_BOUNCE)) 
         {
             BITMASK_SET_1(anim.animMode, PROP_ANIM_MODE_BOUNCE);
             anim.animOpt5 = 1.f;
         }
-        if (BITMASK_IS_1(anim_def.mode, RigDef::Animation::MODE_EVENT_LOCK)) 
+        if (BITMASK_IS_1(anim_def.mode, Truck::Animation::MODE_EVENT_LOCK)) 
         {
             anim.animKeyState = 0.0f;
             anim.lastanimKS = 0.0f;
@@ -2002,7 +1837,7 @@ void ActorSpawner::ProcessProp(RigDef::Prop & def)
     m_props.push_back(prop);
 }
 
-void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
+void ActorSpawner::ProcessFlare2(Truck::Flare2 & def)
 {
     if (m_actor->m_flares_mode == GfxFlaresMode::NONE) { return; }
 
@@ -2012,7 +1847,7 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
     /* Backwards compatibility */
     if (blink_delay == -2) 
     {
-        if (def.type == RigDef::Flare2::TYPE_l_LEFT_BLINKER || def.type == RigDef::Flare2::TYPE_r_RIGHT_BLINKER)
+        if (def.type == Truck::Flare2::TYPE_l_LEFT_BLINKER || def.type == Truck::Flare2::TYPE_r_RIGHT_BLINKER)
         {
             blink_delay = -1; /* Default blink */
         }
@@ -2022,16 +1857,16 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
         }
     }
     
-    if (size == -2.f && def.type == RigDef::Flare2::TYPE_f_HEADLIGHT)
+    if (size == -2.f && def.type == Truck::Flare2::TYPE_f_HEADLIGHT)
     {
         size = 1.f;
     }
-    else if ((size == -2.f && def.type != RigDef::Flare2::TYPE_f_HEADLIGHT) || size == -1.f)
+    else if ((size == -2.f && def.type != Truck::Flare2::TYPE_f_HEADLIGHT) || size == -1.f)
     {
         size = 0.5f;
     }
 
-    flare_t flare;
+    Flare flare;
     flare.fl_type              = static_cast<FlareType>(def.type);
     flare.controlnumber        = def.control_number;
     flare.controltoggle_status = false;
@@ -2063,11 +1898,11 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
         using_default_material = (material_name.length() == 0 || material_name == "default");
         if (using_default_material)
         {
-            if (def.type == RigDef::Flare2::TYPE_b_BRAKELIGHT)
+            if (def.type == Truck::Flare2::TYPE_b_BRAKELIGHT)
             {
                 material_name = "tracks/brakeflare";
             }
-            else if (def.type == RigDef::Flare2::TYPE_l_LEFT_BLINKER || (def.type == RigDef::Flare2::TYPE_r_RIGHT_BLINKER))
+            else if (def.type == Truck::Flare2::TYPE_l_LEFT_BLINKER || (def.type == Truck::Flare2::TYPE_r_RIGHT_BLINKER))
             {
                 material_name = "tracks/blinkflare";
             }
@@ -2089,7 +1924,7 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
     if ((App::gfx_flares_mode->GetEnum<GfxFlaresMode>() >= GfxFlaresMode::CURR_VEHICLE_HEAD_ONLY) && size > 0.001)
     {
         //if (type == 'f' && usingDefaultMaterial && flaresMode >=2 && size > 0.001)
-        if (def.type == RigDef::Flare2::TYPE_f_HEADLIGHT && using_default_material )
+        if (def.type == Truck::Flare2::TYPE_f_HEADLIGHT && using_default_material )
         {
             /* front light */
             flare.light=App::GetGfxScene()->GetSceneManager()->createLight(flare_name);
@@ -2103,7 +1938,7 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
     }
     if ((App::gfx_flares_mode->GetEnum<GfxFlaresMode>() >= GfxFlaresMode::ALL_VEHICLES_ALL_LIGHTS) && size > 0.001)
     {
-        if (def.type == RigDef::Flare2::TYPE_f_HEADLIGHT && ! using_default_material)
+        if (def.type == Truck::Flare2::TYPE_f_HEADLIGHT && ! using_default_material)
         {
             /* this is a quick fix for the red backlight when frontlight is switched on */
             flare.light=App::GetGfxScene()->GetSceneManager()->createLight(flare_name);
@@ -2111,21 +1946,21 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
             flare.light->setSpecularColour( Ogre::ColourValue(1.0, 0, 0));
             flare.light->setAttenuation(10.0, 1.0, 0, 0);
         }
-        else if (def.type == RigDef::Flare2::TYPE_R_REVERSE_LIGHT)
+        else if (def.type == Truck::Flare2::TYPE_R_REVERSE_LIGHT)
         {
             flare.light=App::GetGfxScene()->GetSceneManager()->createLight(flare_name);
             flare.light->setDiffuseColour(Ogre::ColourValue(1, 1, 1));
             flare.light->setSpecularColour(Ogre::ColourValue(1, 1, 1));
             flare.light->setAttenuation(20.0, 1, 0, 0);
         }
-        else if (def.type == RigDef::Flare2::TYPE_b_BRAKELIGHT)
+        else if (def.type == Truck::Flare2::TYPE_b_BRAKELIGHT)
         {
             flare.light=App::GetGfxScene()->GetSceneManager()->createLight(flare_name);
             flare.light->setDiffuseColour( Ogre::ColourValue(1.0, 0, 0));
             flare.light->setSpecularColour( Ogre::ColourValue(1.0, 0, 0));
             flare.light->setAttenuation(10.0, 1.0, 0, 0);
         }
-        else if (def.type == RigDef::Flare2::TYPE_l_LEFT_BLINKER || (def.type == RigDef::Flare2::TYPE_r_RIGHT_BLINKER))
+        else if (def.type == Truck::Flare2::TYPE_l_LEFT_BLINKER || (def.type == Truck::Flare2::TYPE_r_RIGHT_BLINKER))
         {
             flare.light=App::GetGfxScene()->GetSceneManager()->createLight(flare_name);
             flare.light->setDiffuseColour( Ogre::ColourValue(1, 1, 0));
@@ -2133,7 +1968,7 @@ void ActorSpawner::ProcessFlare2(RigDef::Flare2 & def)
             flare.light->setAttenuation(10.0, 1, 1, 0);
         }
         //else if ((type == 'u') && flaresMode >= 4 && size > 0.001)
-        else if (def.type == RigDef::Flare2::TYPE_u_USER)
+        else if (def.type == Truck::Flare2::TYPE_u_USER)
         {
             /* user light always white (TODO: improve this) */
             flare.light=App::GetGfxScene()->GetSceneManager()->createLight(flare_name);
@@ -2173,8 +2008,9 @@ Ogre::MaterialPtr ActorSpawner::InstantiateManagedMaterial(Ogre::String const & 
     return src_mat->clone(clone_name, true, m_custom_resource_group);
 }
 
-void ActorSpawner::ProcessManagedMaterial(RigDef::ManagedMaterial & def)
+void ActorSpawner::ProcessManagedMaterial(Truck::ManagedMaterial & def)
 {
+
     if (m_managed_materials.find(def.name) != m_managed_materials.end())
     {
         this->AddMessage(Message::TYPE_ERROR, "Duplicate managed material name: '" + def.name + "'. Ignoring definition...");
@@ -2191,10 +2027,10 @@ void ActorSpawner::ProcessManagedMaterial(RigDef::ManagedMaterial & def)
 
     std::string custom_name = def.name + ACTOR_ID_TOKEN + TOSTRING(m_actor->ar_instance_id);
     Ogre::MaterialPtr material;
-    if (def.type == RigDef::ManagedMaterial::TYPE_FLEXMESH_STANDARD || def.type == RigDef::ManagedMaterial::TYPE_FLEXMESH_TRANSPARENT)
+    if (def.type == Truck::ManagedMaterial::TYPE_FLEXMESH_STANDARD || def.type == Truck::ManagedMaterial::TYPE_FLEXMESH_TRANSPARENT)
     {
         std::string mat_name_base
-            = (def.type == RigDef::ManagedMaterial::TYPE_FLEXMESH_STANDARD)
+            = (def.type == Truck::ManagedMaterial::TYPE_FLEXMESH_STANDARD)
             ? "managed/flexmesh_standard"
             : "managed/flexmesh_transparent";
 
@@ -2282,10 +2118,10 @@ void ActorSpawner::ProcessManagedMaterial(RigDef::ManagedMaterial & def)
             }
         }
     }
-    else if (def.type == RigDef::ManagedMaterial::TYPE_MESH_STANDARD || def.type == RigDef::ManagedMaterial::TYPE_MESH_TRANSPARENT)
+    else if (def.type == Truck::ManagedMaterial::TYPE_MESH_STANDARD || def.type == Truck::ManagedMaterial::TYPE_MESH_TRANSPARENT)
     {
         Ogre::String mat_name_base
-            = (def.type == RigDef::ManagedMaterial::TYPE_MESH_STANDARD)
+            = (def.type == Truck::ManagedMaterial::TYPE_MESH_STANDARD)
             ? "managed/mesh_standard"
             : "managed/mesh_transparent";
 
@@ -2329,9 +2165,9 @@ void ActorSpawner::ProcessManagedMaterial(RigDef::ManagedMaterial & def)
         }
     }
 
-    if (def.type != RigDef::ManagedMaterial::TYPE_INVALID)
+    if (def.type != Truck::ManagedMaterial::TYPE_INVALID)
     {
-        if (def.options.double_sided)
+        if (m_state.managedmaterials_doublesided)
         {
             material->getTechnique("BaseTechnique")->getPass("BaseRender")->setCullingMode(Ogre::CULL_NONE);
             if (def.HasSpecularMap())
@@ -2354,10 +2190,10 @@ void ActorSpawner::ProcessManagedMaterial(RigDef::ManagedMaterial & def)
     m_managed_materials.insert(std::make_pair(def.name, material));
 }
 
-void ActorSpawner::ProcessCollisionBox(RigDef::CollisionBox & def)
+void ActorSpawner::ProcessCollisionBox(Truck::CollisionBox & def)
 {
     int8_t bbox_id = static_cast<int8_t>(m_actor->ar_collision_bounding_boxes.size());
-    for (RigDef::Node::Ref& node_ref: def.nodes)
+    for (Truck::Node::Ref& node_ref: def.nodes)
     {
         std::pair<unsigned int, bool> node_result = this->GetNodeIndex(node_ref);
         if (! node_result.second)
@@ -2395,7 +2231,7 @@ bool ActorSpawner::AssignWheelToAxle(int & _out_axle_wheel, node_t *axis_node_1,
     return false;
 }
 
-void ActorSpawner::ProcessAxle(RigDef::Axle & def)
+void ActorSpawner::ProcessAxle(Truck::Axle & def)
 {
     if (! CheckAxleLimit(1))
     {
@@ -2438,20 +2274,20 @@ void ActorSpawner::ProcessAxle(RigDef::Axle & def)
         {
             switch (*itor)
             {
-            case RigDef::Axle::OPTION_l_LOCKED:
+            case Truck::DifferentialType::DIFF_l_LOCKED:
                 diff->AddDifferentialType(LOCKED_DIFF);
                 break;
-            case RigDef::Axle::OPTION_o_OPEN:
+            case Truck::DifferentialType::DIFF_o_OPEN:
                 diff->AddDifferentialType(OPEN_DIFF);
                 break;
-            case RigDef::Axle::OPTION_s_SPLIT:
+            case Truck::DifferentialType::DIFF_s_SPLIT:
                 diff->AddDifferentialType(SPLIT_DIFF);
                 break;
-            case RigDef::Axle::OPTION_s_VISCOUS:
+            case Truck::DifferentialType::DIFF_v_VISCOUS:
                 diff->AddDifferentialType(VISCOUS_DIFF);
                 break;
             default:
-                AddMessage(Message::TYPE_WARNING, "Unknown differential type: " + *itor);
+                AddMessage(Message::TYPE_WARNING, fmt::format("Unknown differential type: '{}'", (char)*itor));
                 break;
             }
         }
@@ -2461,7 +2297,7 @@ void ActorSpawner::ProcessAxle(RigDef::Axle & def)
     m_actor->m_num_wheel_diffs++;
 }
 
-void ActorSpawner::ProcessInterAxle(RigDef::InterAxle & def)
+void ActorSpawner::ProcessInterAxle(Truck::InterAxle & def)
 {
     if (def.a1 == def.a2 || std::min(def.a1, def.a2) < 0 || std::max(def.a1 , def.a2) >= m_actor->m_num_wheel_diffs)
     {
@@ -2496,20 +2332,20 @@ void ActorSpawner::ProcessInterAxle(RigDef::InterAxle & def)
         {
             switch (*itor)
             {
-            case RigDef::Axle::OPTION_l_LOCKED:
+            case Truck::DifferentialType::DIFF_l_LOCKED:
                 diff->AddDifferentialType(LOCKED_DIFF);
                 break;
-            case RigDef::Axle::OPTION_o_OPEN:
+            case Truck::DifferentialType::DIFF_o_OPEN:
                 diff->AddDifferentialType(OPEN_DIFF);
                 break;
-            case RigDef::Axle::OPTION_s_SPLIT:
+            case Truck::DifferentialType::DIFF_s_SPLIT:
                 diff->AddDifferentialType(SPLIT_DIFF);
                 break;
-            case RigDef::Axle::OPTION_s_VISCOUS:
+            case Truck::DifferentialType::DIFF_v_VISCOUS:
                 diff->AddDifferentialType(VISCOUS_DIFF);
                 break;
             default:
-                AddMessage(Message::TYPE_WARNING, "Unknown differential type: " + *itor);
+                AddMessage(Message::TYPE_WARNING, fmt::format("Unknown differential type: '{}'", (char)*itor));
                 break;
             }
         }
@@ -2519,7 +2355,7 @@ void ActorSpawner::ProcessInterAxle(RigDef::InterAxle & def)
     m_actor->m_num_axle_diffs++;
 }
 
-void ActorSpawner::ProcessTransferCase(RigDef::TransferCase & def)
+void ActorSpawner::ProcessTransferCase(Truck::TransferCase & def)
 {
     if (def.a1 == def.a2 || def.a1 < 0 || std::max(def.a1 , def.a2) >= m_actor->m_num_wheel_diffs)
     {
@@ -2557,7 +2393,7 @@ void ActorSpawner::ProcessTransferCase(RigDef::TransferCase & def)
     }
 }
 
-void ActorSpawner::ProcessCruiseControl(RigDef::CruiseControl & def)
+void ActorSpawner::ProcessCruiseControl(Truck::CruiseControl & def)
 {
     m_actor->cc_target_speed_lower_limit = def.min_speed;
     if (m_actor->cc_target_speed_lower_limit <= 0.f)
@@ -2569,7 +2405,12 @@ void ActorSpawner::ProcessCruiseControl(RigDef::CruiseControl & def)
     m_actor->cc_can_brake = def.autobrake != 0;
 }
 
-void ActorSpawner::ProcessTorqueCurve(RigDef::TorqueCurve & def)
+void ActorSpawner::ProcessSpeedLimiter(Truck::SpeedLimiter & def)
+{
+    m_actor->sl_speed_limit = def.max_speed;
+}
+
+void ActorSpawner::ProcessTorqueCurve(Truck::TorqueCurve & def)
 {
     if (m_actor->ar_engine == nullptr)
     {
@@ -2586,7 +2427,7 @@ void ActorSpawner::ProcessTorqueCurve(RigDef::TorqueCurve & def)
     else
     {
         target_torque_curve->CreateNewCurve(); /* Use default name for custom curve */
-        std::vector<RigDef::TorqueCurve::Sample>::iterator itor = def.samples.begin();
+        std::vector<Truck::TorqueCurve::Sample>::iterator itor = def.samples.begin();
         for ( ; itor != def.samples.end(); itor++)
         {
             target_torque_curve->AddCurveSample(itor->power, itor->torque_percent);
@@ -2594,7 +2435,7 @@ void ActorSpawner::ProcessTorqueCurve(RigDef::TorqueCurve & def)
     }
 }
 
-void ActorSpawner::ProcessParticle(RigDef::Particle & def)
+void ActorSpawner::ProcessParticle(Truck::Particle & def)
 {
     if (App::gfx_particles_mode->GetInt() != 1)
     {
@@ -2602,7 +2443,7 @@ void ActorSpawner::ProcessParticle(RigDef::Particle & def)
     }
 
     int particle_index = m_actor->ar_num_custom_particles;
-    cparticle_t & particle = m_actor->ar_custom_particles[particle_index];
+    CParticle & particle = m_actor->ar_custom_particles[particle_index];
 
     particle.emitterNode = GetNodeIndexOrThrow(def.emitter_node);
     particle.directionNode = GetNodeIndexOrThrow(def.reference_node);
@@ -2631,7 +2472,7 @@ void ActorSpawner::ProcessParticle(RigDef::Particle & def)
     ++m_actor->ar_num_custom_particles;
 }
 
-void ActorSpawner::ProcessRopable(RigDef::Ropable & def)
+void ActorSpawner::ProcessRopable(Truck::Ropable & def)
 {
     ropable_t ropable;
     ropable.node = GetNodePointerOrThrow(def.node);
@@ -2643,16 +2484,17 @@ void ActorSpawner::ProcessRopable(RigDef::Ropable & def)
     m_actor->ar_ropables.push_back(ropable);
 }
 
-void ActorSpawner::ProcessTie(RigDef::Tie & def)
+void ActorSpawner::ProcessTie(Truck::Tie & def)
 {
+
     node_t & node_1 = GetNodeOrThrow(def.root_node);
     node_t & node_2 = GetNode( (node_1.pos == 0) ? 1 : 0 );
 
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(node_1, node_2, def.beam_defaults, def.detacher_group);
-    SetBeamStrength(beam, def.beam_defaults->GetScaledBreakingThreshold());
-    beam.k = def.beam_defaults->GetScaledSpringiness();
-    beam.d = def.beam_defaults->GetScaledDamping();
+    beam_t & beam = AddBeam(node_1, node_2);
+    beam.strength =  m_state.default_break * m_state.default_break_scale;
+    beam.k = m_state.default_spring * m_state.default_spring_scale;
+    beam.d = m_state.default_damp * m_state.default_damp_scale;
     beam.bm_type = BEAM_HYDRO;
     beam.L = def.max_reach_length;
     beam.refL = def.max_reach_length;
@@ -2661,7 +2503,7 @@ void ActorSpawner::ProcessTie(RigDef::Tie & def)
 
     if (!def.is_invisible)
     {
-        this->CreateBeamVisuals(beam, beam_index, false, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, false);
     }
 
     /* Register tie */
@@ -2681,23 +2523,24 @@ void ActorSpawner::ProcessTie(RigDef::Tie & def)
     m_actor->m_has_command_beams = true;
 }
 
-void ActorSpawner::ProcessRope(RigDef::Rope & def)
+void ActorSpawner::ProcessRope(Truck::Rope & def)
 {
+
     node_t & root_node = GetNodeOrThrow(def.root_node);
     node_t & end_node = GetNodeOrThrow(def.end_node);
 
     /* Add beam */
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(root_node, end_node, def.beam_defaults, def.detacher_group);
-    SetBeamStrength(beam, def.beam_defaults->GetScaledBreakingThreshold());
-    beam.k = def.beam_defaults->GetScaledSpringiness();
-    beam.d = def.beam_defaults->GetScaledDamping();
+    beam_t & beam = AddBeam(root_node, end_node);
+    beam.strength = m_state.default_break * m_state.default_break_scale;
+    beam.k = m_state.default_spring * m_state.default_spring_scale;
+    beam.d = m_state.default_damp * m_state.default_damp_scale;
     beam.bounded = ROPE;
     beam.bm_type = BEAM_HYDRO;
     beam.L = root_node.AbsPosition.distance(end_node.AbsPosition);
     beam.refL = beam.L;
 
-    this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults, "tracks/beam");
+    this->CreateBeamVisuals(beam, beam_index, true, "tracks/beam");
 
     /* Register rope */
     rope_t rope;
@@ -2708,49 +2551,48 @@ void ActorSpawner::ProcessRope(RigDef::Rope & def)
     m_actor->ar_ropes.push_back(rope);
 }
 
-void ActorSpawner::ProcessRailGroup(RigDef::RailGroup & def)
+void ActorSpawner::ProcessRailGroup(Truck::RailGroup & def)
 {
     RailGroup* rail_group = this->CreateRail(def.node_list);
     rail_group->rg_id = def.id;
     m_actor->m_railgroups.push_back(rail_group);
 }
 
-void ActorSpawner::ProcessSlidenode(RigDef::SlideNode & def)
+void ActorSpawner::ProcessSlidenode(Truck::SlideNode & def)
 {
     node_t & node = GetNodeOrThrow(def.slide_node);
     SlideNode slide_node(& node, nullptr);
-    slide_node.SetCorThreshold(def.tolerance);
-    slide_node.SetSpringRate(def.spring_rate);
-    slide_node.SetAttachmentRate(def.attachment_rate);
-    if (def._break_force_set)
-    {
-        slide_node.SetBreakForce(def.break_force);
-    }
-    slide_node.SetAttachmentDistance(def.max_attachment_distance);
+
+    // Optional args
+    if (def._spring_rate_set)      { slide_node.SetSpringRate(def.spring_rate); }
+    if (def._break_force_set)      { slide_node.SetBreakForce(def.break_force); }
+    if (def._tolerance_set)        { slide_node.SetCorThreshold(def.tolerance); }
+    if (def._attachment_rate_set)  { slide_node.SetAttachmentRate(def.attachment_rate); }
+    if (def._max_attach_dist_set)  { slide_node.SetAttachmentDistance(def.max_attach_dist); }
 
     // Constraints
-    if (BITMASK_IS_1(def.constraint_flags, RigDef::SlideNode::CONSTRAINT_ATTACH_ALL))
+    if (BITMASK_IS_1(def.constraint_flags, Truck::SlideNode::CONSTRAINT_ATTACH_ALL))
     {
         slide_node.sn_attach_self = true;
         slide_node.sn_attach_foreign = true;
     }
-    if (BITMASK_IS_1(def.constraint_flags, RigDef::SlideNode::CONSTRAINT_ATTACH_SELF))
+    if (BITMASK_IS_1(def.constraint_flags, Truck::SlideNode::CONSTRAINT_ATTACH_SELF))
     {
         slide_node.sn_attach_self = true;
         slide_node.sn_attach_foreign = false;
     }
-    if (BITMASK_IS_1(def.constraint_flags, RigDef::SlideNode::CONSTRAINT_ATTACH_FOREIGN))
+    if (BITMASK_IS_1(def.constraint_flags, Truck::SlideNode::CONSTRAINT_ATTACH_FOREIGN))
     {
         slide_node.sn_attach_self = false;
         slide_node.sn_attach_foreign = true;
     }
-    if (BITMASK_IS_1(def.constraint_flags, RigDef::SlideNode::CONSTRAINT_ATTACH_NONE))
+    if (BITMASK_IS_1(def.constraint_flags, Truck::SlideNode::CONSTRAINT_ATTACH_NONE))
     {
         slide_node.sn_attach_self = false;
         slide_node.sn_attach_foreign = false;
     }
 
-    /* RailGroup */
+    // RailGroup
     RailGroup *rail_group = nullptr;
     if (def._railgroup_id_set)
     {
@@ -2789,12 +2631,12 @@ void ActorSpawner::ProcessSlidenode(RigDef::SlideNode & def)
     m_actor->m_slidenodes.push_back(slide_node);
 }
 
-int ActorSpawner::FindNodeIndex(RigDef::Node::Ref & node_ref, bool silent /* Default: false */)
+NodeIdx_t ActorSpawner::FindNodeIndex(Truck::Node::Ref & node_ref, bool silent /* = false */)
 {
-    std::pair<unsigned int, bool> result = GetNodeIndex(node_ref, /* quiet */ true);
+    std::pair<unsigned int, bool> result = GetNodeIndex(node_ref, /* quiet= */ true);
     if (result.second)
     {
-        return static_cast<int>(result.first);
+        return static_cast<NodeIdx_t>(result.first);
     }
     else
     {
@@ -2804,37 +2646,31 @@ int ActorSpawner::FindNodeIndex(RigDef::Node::Ref & node_ref, bool silent /* Def
             msg << "Failed to find node by reference: " << node_ref.ToString();
             AddMessage(Message::TYPE_ERROR, msg.str());
         }
-        return -1; /* Node not found */
+        return node_t::INVALID_IDX;
     }
 }
 
 bool ActorSpawner::CollectNodesFromRanges(
-    std::vector<RigDef::Node::Range> & node_ranges,
-    std::vector<unsigned int> & out_node_indices
+    std::vector<Truck::Node::Range> & node_ranges,
+    std::vector<NodeIdx_t> & out_node_indices
     )
 {
-    std::vector<RigDef::Node::Range>::iterator itor = node_ranges.begin();
+    std::vector<Truck::Node::Range>::iterator itor = node_ranges.begin();
     for ( ; itor != node_ranges.end(); itor++)
     {
         if (itor->IsRange())
         {
 
-            int result_a = FindNodeIndex(itor->start, /* silent */ false);
-            int result_b = FindNodeIndex(itor->end,   /* silent */ true);
-
-            unsigned int start = 0;
-            unsigned int end = 0;
-
-            if (result_a == -1)
+            NodeIdx_t start = FindNodeIndex(itor->start, /* silent= */ false);
+            if (start == node_t::INVALID_IDX)
             {
+                AddMessage(Message::TYPE_WARNING, fmt::format("Invalid start node in range: {}", itor->start.ToString()));
                 return false;
             }
-            else
-            {
-                start = static_cast<unsigned int>(result_a);
-            }
 
-            if (result_b == -1)
+            NodeIdx_t end = FindNodeIndex(itor->end,   /* silent= */ true);
+
+            if (end == node_t::INVALID_IDX)
             {
                 std::stringstream msg;
                 msg << "Encountered non-existent node '" << itor->end.ToString() << "' in range [" << itor->start.ToString() << " - " << itor->end.ToString() << "], "
@@ -2853,19 +2689,15 @@ bool ActorSpawner::CollectNodesFromRanges(
                     return false;
                 }
             }
-            else
-            {
-                end = static_cast<unsigned int>(result_b);
-            }
 
             if (end < start)
             {
-                unsigned int swap = start;
+                NodeIdx_t swap = start;
                 start = end;
                 end = swap;
             }
 
-            for (unsigned int i = start; i <= end; i++)
+            for (NodeIdx_t i = start; i <= end; i++)
             {
                 out_node_indices.push_back(i);
             }
@@ -2878,10 +2710,10 @@ bool ActorSpawner::CollectNodesFromRanges(
     return true;
 }
 
-RailGroup *ActorSpawner::CreateRail(std::vector<RigDef::Node::Range> & node_ranges)
+RailGroup *ActorSpawner::CreateRail(std::vector<Truck::Node::Range> & node_ranges)
 {
     // Collect nodes
-    std::vector<unsigned int> node_indices;
+    std::vector<NodeIdx_t> node_indices;
     this->CollectNodesFromRanges(node_ranges, node_indices);
 
     // Build the rail
@@ -2924,7 +2756,7 @@ RailGroup *ActorSpawner::CreateRail(std::vector<RigDef::Node::Range> & node_rang
     return rg; // Transfers memory ownership
 }
 
-beam_t *ActorSpawner::FindBeamInRig(unsigned int node_a_index, unsigned int node_b_index)
+beam_t *ActorSpawner::FindBeamInRig(NodeIdx_t node_a_index, NodeIdx_t node_b_index)
 {
     node_t *node_a = & m_actor->ar_nodes[node_a_index];
     node_t *node_b = & m_actor->ar_nodes[node_b_index];
@@ -2942,7 +2774,7 @@ beam_t *ActorSpawner::FindBeamInRig(unsigned int node_a_index, unsigned int node
     return nullptr;
 }
 
-void ActorSpawner::ProcessHook(RigDef::Hook & def)
+void ActorSpawner::ProcessHook(Truck::Hook & def)
 {
     /* Find the node */
     node_t *node = GetNodePointer(def.node);
@@ -2992,7 +2824,7 @@ void ActorSpawner::ProcessHook(RigDef::Hook & def)
     }
     if (def.flag_no_rope)
     {
-        hook->hk_beam->bounded = NOSHOCK;
+        hook->hk_beam->bounded = REGULAR_BEAM;
     }
     if (!def.flag_visible) // NOTE: This flag can only hide a visible beam - it won't show a beam defined with 'invisible' flag.
     {
@@ -3022,7 +2854,7 @@ void ActorSpawner::ProcessHook(RigDef::Hook & def)
     }
 }
 
-void ActorSpawner::ProcessLockgroup(RigDef::Lockgroup & lockgroup)
+void ActorSpawner::ProcessLockgroup(Truck::Lockgroup & lockgroup)
 {
     auto itor = lockgroup.nodes.begin();
     auto end  = lockgroup.nodes.end();
@@ -3032,7 +2864,7 @@ void ActorSpawner::ProcessLockgroup(RigDef::Lockgroup & lockgroup)
     }
 }
 
-void ActorSpawner::ProcessTrigger(RigDef::Trigger & def)
+void ActorSpawner::ProcessTrigger(Truck::Trigger & def)
 {
     shock_t & shock = this->GetFreeShock();
 
@@ -3112,16 +2944,17 @@ void ActorSpawner::ProcessTrigger(RigDef::Trigger & def)
         }
     }
 
-    int node_1_index = FindNodeIndex(def.nodes[0]);
-    int node_2_index = FindNodeIndex(def.nodes[1]);
-    if (node_1_index == -1 || node_2_index == -1 )
+    const NodeIdx_t node_1_index = FindNodeIndex(def.nodes[0]);
+    const NodeIdx_t node_2_index = FindNodeIndex(def.nodes[1]);
+    if (node_1_index == node_t::INVALID_IDX || node_2_index == node_t::INVALID_IDX)
     {
+        this->AddMessage(Message::TYPE_WARNING, "Skipping trigger, some nodes not found");
         return;
     }
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(GetNode(node_1_index), GetNode(node_2_index), def.beam_defaults, def.detacher_group);
+    beam_t & beam = AddBeam(GetNode(node_1_index), GetNode(node_2_index));
     beam.bm_type = BEAM_HYDRO;
-    SetBeamStrength(beam, def.beam_defaults->breaking_threshold);
+    SetBeamStrength(beam, m_state.default_break * m_state.default_break_scale);
     SetBeamSpring(beam, 0.f);
     SetBeamDamping(beam, 0.f);
     CalculateBeamLength(beam);
@@ -3132,7 +2965,7 @@ void ActorSpawner::ProcessTrigger(RigDef::Trigger & def)
 
     if (! def.HasFlag_i_Invisible())
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
     if (m_actor->m_trigger_debug_enabled)
@@ -3187,25 +3020,26 @@ void ActorSpawner::ProcessTrigger(RigDef::Trigger & def)
 
     shock.trigger_boundary_t = def.boundary_timer;
     shock.flags              = shock_flags;
-    shock.sbd_spring         = def.beam_defaults->springiness;
-    shock.sbd_damp           = def.beam_defaults->damping_constant;
+    shock.sbd_spring         = m_state.default_spring;
+    shock.sbd_damp           = m_state.default_damp;
     shock.last_debug_state   = 0;
     
 }
 
-void ActorSpawner::ProcessContacter(RigDef::Node::Ref & node_ref)
+void ActorSpawner::ProcessContacter(Truck::Node::Ref & node_ref)
 {
     unsigned int node_index = GetNodeIndexOrThrow(node_ref);
     m_actor->ar_nodes[node_index].nd_contacter = true;
 };
 
-void ActorSpawner::ProcessRotator(RigDef::Rotator & def)
+void ActorSpawner::ProcessRotator(Truck::Rotator & def)
 {
+
     rotator_t & rotator = m_actor->ar_rotators[m_actor->ar_num_rotators];
 
-    rotator.angle = 0;
-    rotator.rate = def.rate;
-    rotator.axis1 = GetNodeIndexOrThrow(def.axis_nodes[0]);
+    rotator.angle     = 0;
+    rotator.rate      = def.rate;
+    rotator.axis1     = GetNodeIndexOrThrow(def.axis_nodes[0]);
     rotator.axis2     = GetNodeIndexOrThrow(def.axis_nodes[1]);
     rotator.force     = ROTATOR_FORCE_DEFAULT;
     rotator.tolerance = ROTATOR_TOLERANCE_DEFAULT;
@@ -3227,7 +3061,7 @@ void ActorSpawner::ProcessRotator(RigDef::Rotator & def)
     // Rotate right key
     m_actor->ar_command_key[def.spin_right_key].rotators.push_back(m_actor->ar_num_rotators + 1);
 
-    this->_ProcessKeyInertia(def.inertia, *def.inertia_defaults,
+    this->_ProcessKeyInertia(def.inertia,
                              m_actor->ar_command_key[def.spin_left_key].rotator_inertia,
                              m_actor->ar_command_key[def.spin_right_key].rotator_inertia);
 
@@ -3235,7 +3069,7 @@ void ActorSpawner::ProcessRotator(RigDef::Rotator & def)
     m_actor->m_has_command_beams = true;
 }
 
-void ActorSpawner::ProcessRotator2(RigDef::Rotator2 & def)
+void ActorSpawner::ProcessRotator2(Truck::Rotator2 & def)
 {
     rotator_t & rotator = m_actor->ar_rotators[m_actor->ar_num_rotators];
 
@@ -3270,7 +3104,7 @@ void ActorSpawner::ProcessRotator2(RigDef::Rotator2 & def)
     // Rotate right key
     m_actor->ar_command_key[def.spin_right_key].rotators.push_back(m_actor->ar_num_rotators + 1);
 
-    this->_ProcessKeyInertia(def.inertia, *def.inertia_defaults,
+    this->_ProcessKeyInertia(def.inertia,
                              m_actor->ar_command_key[def.spin_left_key].rotator_inertia,
                              m_actor->ar_command_key[def.spin_right_key].rotator_inertia);
 
@@ -3279,8 +3113,7 @@ void ActorSpawner::ProcessRotator2(RigDef::Rotator2 & def)
 }
 
 void ActorSpawner::_ProcessKeyInertia(
-    RigDef::Inertia & inertia,
-    RigDef::Inertia & inertia_defaults,
+    Truck::BaseInertia & inertia,
     RoR::CmdKeyInertia& contract_cmd,
     RoR::CmdKeyInertia& extend_cmd
 )
@@ -3314,41 +3147,36 @@ void ActorSpawner::_ProcessKeyInertia(
             stop_function
         );
     }
-    else if (inertia_defaults.start_delay_factor > 0 || inertia_defaults.stop_delay_factor > 0)
+    else if (m_state.inertia_startDelay > 0 || m_state.inertia_stopDelay > 0)
     {
         contract_cmd.SetCmdKeyDelay(
             App::GetGameContext()->GetActorManager()->GetInertiaConfig(),
-            inertia_defaults.start_delay_factor,
-            inertia_defaults.stop_delay_factor,
-            inertia_defaults.start_function,
-            inertia_defaults.stop_function
+            m_state.inertia_startDelay,
+            m_state.inertia_stopDelay,
+            m_state.inertia_default_startFunction,
+            m_state.inertia_default_stopFunction
         );
 
         extend_cmd.SetCmdKeyDelay(
             App::GetGameContext()->GetActorManager()->GetInertiaConfig(),
-            inertia_defaults.start_delay_factor,
-            inertia_defaults.stop_delay_factor,
-            inertia_defaults.start_function,
-            inertia_defaults.stop_function
+            m_state.inertia_startDelay,
+            m_state.inertia_stopDelay,
+            m_state.inertia_default_startFunction,
+            m_state.inertia_default_stopFunction
         );
     }
 }
 
-void ActorSpawner::ProcessCommand(RigDef::Command2 & def)
+void ActorSpawner::ProcessCommand(Truck::Command2 & def)
 {
+
+    // Set up beam
     int beam_index = m_actor->ar_num_beams;
-    int node_1_index = FindNodeIndex(def.nodes[0]);
-    int node_2_index = FindNodeIndex(def.nodes[1]);
-    if (node_1_index == -1 || node_2_index == -1)
-    {
-        AddMessage(Message::TYPE_ERROR, "Failed to fetch node");
-        return;
-    }
-    beam_t & beam = AddBeam(m_actor->ar_nodes[node_1_index], m_actor->ar_nodes[node_2_index], def.beam_defaults, def.detacher_group);
+    beam_t & beam = AddBeam(def.nodes[0], def.nodes[1]);
     CalculateBeamLength(beam);
-    SetBeamStrength(beam, def.beam_defaults->GetScaledBreakingThreshold()); /* Override settings from AddBeam() */
-    SetBeamSpring(beam, def.beam_defaults->GetScaledSpringiness());
-    SetBeamDamping(beam, def.beam_defaults->GetScaledDamping());
+    beam.strength = m_state.default_break * m_state.default_break_scale;
+    beam.k = m_state.default_spring * m_state.default_spring_scale;
+    beam.d = m_state.default_damp * m_state.default_damp_scale;
     beam.bm_type = BEAM_HYDRO;
 
     /* Options */
@@ -3397,149 +3225,151 @@ void ActorSpawner::ProcessCommand(RigDef::Command2 & def)
         extend_command->description = def.description;
     }
 
-    this->_ProcessKeyInertia(def.inertia, *def.inertia_defaults,
+    this->_ProcessKeyInertia(def.inertia,
                              contract_command->command_inertia,
                              extend_command->command_inertia);
 
     if (! def.option_i_invisible)
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
     m_actor->m_num_command_beams++;
     m_actor->m_has_command_beams = true;
 }
 
-void ActorSpawner::ProcessAnimator(RigDef::Animator & def)
+void ActorSpawner::ProcessAnimator(Truck::Animator & def)
 {
     int anim_flags = 0;
     float anim_option = 0;
 
     /* Options. '{' intentionally misplaced. */
 
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_AIRSPEED)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_AIRSPEED)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_AIRSPEED);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_VERTICAL_VELOCITY)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_VERTICAL_VELOCITY)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_VVI);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_ANGLE_OF_ATTACK)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_ANGLE_OF_ATTACK)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_AOA);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_FLAP)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_FLAP)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_FLAP);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_AIR_BRAKE)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_AIR_BRAKE)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_AIRBRAKE);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_ROLL))	{
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_ROLL))	{
         BITMASK_SET_1(anim_flags, ANIM_FLAG_ROLL);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_PITCH)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_PITCH)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_PITCH);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_BRAKES)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_BRAKES)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_BRAKE);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_ACCEL)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_ACCEL)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_ACCEL);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_CLUTCH)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_CLUTCH)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_CLUTCH);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_SPEEDO)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_SPEEDO)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_SPEEDO);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_TACHO)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_TACHO)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_TACHO);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_TURBO)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_TURBO)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_TURBO);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_PARKING)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_PARKING)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_PBRAKE);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_TORQUE)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_TORQUE)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_TORQUE);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_BOAT_THROTTLE)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_BOAT_THROTTLE)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_BTHROTTLE);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_BOAT_RUDDER)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_BOAT_RUDDER)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_BRUDDER);
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_SHIFT_LEFT_RIGHT)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_SHIFT_LEFT_RIGHT)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_SHIFTER);
         anim_option = 1.f;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_SHIFT_BACK_FORTH))	{
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_SHIFT_BACK_FORTH))	{
         BITMASK_SET_1(anim_flags, ANIM_FLAG_SHIFTER);
         anim_option = 2.f;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_SEQUENTIAL_SHIFT)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_SEQUENTIAL_SHIFT)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_SHIFTER);
         anim_option = 3.f;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_GEAR_SELECT)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_GEAR_SELECT)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_SHIFTER);
         anim_option = 4.f;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_ALTIMETER_100K)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_ALTIMETER_100K)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_ALTIMETER);
         anim_option = 1.f;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_ALTIMETER_10K)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_ALTIMETER_10K)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_ALTIMETER);
         anim_option = 2.f;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_ALTIMETER_1K)) {
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_ALTIMETER_1K)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_ALTIMETER);
         anim_option = 3.f;
     }
     
     /* Aerial */
-    if (BITMASK_IS_1(def.aero_animator.flags, RigDef::AeroAnimator::OPTION_THROTTLE)) {
+    if (BITMASK_IS_1(def.aero_animator.flags, Truck::AeroAnimator::OPTION_THROTTLE)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_THROTTLE);
-        anim_option = static_cast<float>(def.aero_animator.motor);
+        anim_option = static_cast<float>(def.aero_animator.engine_idx);
     }
-    if (BITMASK_IS_1(def.aero_animator.flags, RigDef::AeroAnimator::OPTION_RPM)) {
+    if (BITMASK_IS_1(def.aero_animator.flags, Truck::AeroAnimator::OPTION_RPM)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_RPM);
-        anim_option = static_cast<float>(def.aero_animator.motor);
+        anim_option = static_cast<float>(def.aero_animator.engine_idx);
     }
-    if (BITMASK_IS_1(def.aero_animator.flags, RigDef::AeroAnimator::OPTION_TORQUE)) {
+    if (BITMASK_IS_1(def.aero_animator.flags, Truck::AeroAnimator::OPTION_TORQUE)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_AETORQUE);
-        anim_option = static_cast<float>(def.aero_animator.motor);
+        anim_option = static_cast<float>(def.aero_animator.engine_idx);
     }
-    if (BITMASK_IS_1(def.aero_animator.flags, RigDef::AeroAnimator::OPTION_PITCH)) {
+    if (BITMASK_IS_1(def.aero_animator.flags, Truck::AeroAnimator::OPTION_PITCH)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_AEPITCH);
-        anim_option = static_cast<float>(def.aero_animator.motor);
+        anim_option = static_cast<float>(def.aero_animator.engine_idx);
     }
-    if (BITMASK_IS_1(def.aero_animator.flags, RigDef::AeroAnimator::OPTION_STATUS)) {
+    if (BITMASK_IS_1(def.aero_animator.flags, Truck::AeroAnimator::OPTION_STATUS)) {
         BITMASK_SET_1(anim_flags, ANIM_FLAG_AESTATUS);
-        anim_option = static_cast<float>(def.aero_animator.motor);
+        anim_option = static_cast<float>(def.aero_animator.engine_idx);
     }
 
+    
+    // Set up beam
     unsigned int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(GetNode(def.nodes[0]), GetNode(def.nodes[1]), def.beam_defaults, def.detacher_group);
+    beam_t & beam = AddBeam(def.nodes[0], def.nodes[1]);
     /* set the limits to something with sense by default */
     beam.shortbound = 0.99999f;
     beam.longbound = 1000000.0f;
     beam.bm_type = BEAM_HYDRO;
     CalculateBeamLength(beam);
-    SetBeamStrength(beam, def.beam_defaults->GetScaledBreakingThreshold());
-    SetBeamSpring(beam, def.beam_defaults->GetScaledSpringiness());
-    SetBeamDamping(beam, def.beam_defaults->GetScaledDamping());
+    beam.strength = m_state.default_break * m_state.default_break_scale;
+    beam.k = m_state.default_spring * m_state.default_spring_scale;
+    beam.d = m_state.default_damp * m_state.default_damp_scale;
 
-    if (BITMASK_IS_0(def.flags, RigDef::Animator::OPTION_INVISIBLE))
+    if (BITMASK_IS_0(def.flags, Truck::Animator::OPTION_INVISIBLE))
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_SHORT_LIMIT)) 
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_SHORT_LIMIT)) 
     {
         beam.shortbound = def.short_limit;
     }
-    if (BITMASK_IS_1(def.flags, RigDef::Animator::OPTION_LONG_LIMIT)) 
+    if (BITMASK_IS_1(def.flags, Truck::Animator::OPTION_LONG_LIMIT)) 
     {
         beam.longbound = def.long_limit;
     }
@@ -3552,43 +3382,44 @@ void ActorSpawner::ProcessAnimator(RigDef::Animator & def)
     hb.hb_anim_flags = anim_flags;
     hb.hb_anim_param = anim_option;
 
-    if (def.inertia_defaults->start_delay_factor > 0 && def.inertia_defaults->stop_delay_factor > 0)
+
+    if (m_state.inertia_startDelay > 0 && m_state.inertia_stopDelay > 0)
     {
         hb.hb_inertia.SetCmdKeyDelay(
             App::GetGameContext()->GetActorManager()->GetInertiaConfig(),
-            def.inertia_defaults->start_delay_factor,
-            def.inertia_defaults->stop_delay_factor,
-            def.inertia_defaults->start_function,
-            def.inertia_defaults->stop_function
+            m_state.inertia_startDelay,
+            m_state.inertia_stopDelay,
+            m_state.inertia_default_startFunction,
+            m_state.inertia_default_stopFunction
         );
     }
 
     m_actor->ar_hydros.push_back(hb);
 }
 
-beam_t & ActorSpawner::AddBeam(
-    node_t & node_1, 
-    node_t & node_2, 
-    std::shared_ptr<RigDef::BeamDefaults> & beam_defaults,
-    int detacher_group
-)
+beam_t & ActorSpawner::AddBeam(node_t & node_1, node_t & node_2)
 {
-    /* Init */
     beam_t & beam = GetAndInitFreeBeam(node_1, node_2);
-    beam.detacher_group = detacher_group;
+    beam.detacher_group = m_state.detacher_group_state;
     beam.bm_disabled = false;
 
-    /* Breaking threshold (strength) */
-    float strength = beam_defaults->breaking_threshold;
-    beam.strength = strength;
+    beam.strength = m_state.default_break;
 
-    /* Deformation */
-    SetBeamDeformationThreshold(beam, beam_defaults);
+    beam.default_beam_deform = m_state.default_deform * m_state.default_deform_scale;
+    beam.minmaxposnegstress = m_state.default_deform * m_state.default_deform_scale;
+    beam.maxposstress = m_state.default_deform * m_state.default_deform_scale;
+    beam.maxnegstress = m_state.default_deform * m_state.default_deform_scale;
 
-    float plastic_coef = beam_defaults->plastic_deform_coef;
-    beam.plastic_coef = plastic_coef;
+    beam.plastic_coef = m_state.default_plastic_coef;
 
     return beam;
+}
+
+beam_t& ActorSpawner::AddBeam(Truck::Node::Ref n1, Truck::Node::Ref n2)
+{
+    return this->AddBeam(
+        m_actor->ar_nodes[this->ResolveNodeRef(n1)],
+        m_actor->ar_nodes[this->ResolveNodeRef(n2)]);
 }
 
 void ActorSpawner::SetBeamStrength(beam_t & beam, float strength)
@@ -3596,7 +3427,7 @@ void ActorSpawner::SetBeamStrength(beam_t & beam, float strength)
     beam.strength = strength;
 }
 
-void ActorSpawner::ProcessHydro(RigDef::Hydro & def)
+void ActorSpawner::ProcessHydro(Truck::Hydro & def)
 {
     bool invisible = false;
     unsigned int hydro_flags = 0;
@@ -3614,41 +3445,41 @@ void ActorSpawner::ProcessHydro(RigDef::Hydro & def)
             const char c = def.options[i];
             switch (c)
             {
-                case RigDef::Hydro::OPTION_i_INVISIBLE:  // i
+                case Truck::Hydro::OPTION_i_INVISIBLE:  // i
                     invisible = true;
                     break;
-                case RigDef::Hydro::OPTION_n_NORMAL:  // n
+                case Truck::Hydro::OPTION_n_NORMAL:  // n
                     invisible = false;
                     hydro_flags |= HYDRO_FLAG_DIR;
                     break;
-                case RigDef::Hydro::OPTION_s_DISABLE_ON_HIGH_SPEED:  // 's': // speed changing hydro
+                case Truck::Hydro::OPTION_s_DISABLE_ON_HIGH_SPEED:  // 's': // speed changing hydro
                     hydro_flags |= HYDRO_FLAG_SPEED;
                     break;
-                case RigDef::Hydro::OPTION_a_INPUT_AILERON:  // 'a':
+                case Truck::Hydro::OPTION_a_INPUT_AILERON:  // 'a':
                     hydro_flags |= HYDRO_FLAG_AILERON;
                     break;
-                case RigDef::Hydro::OPTION_r_INPUT_RUDDER:  // 'r':
+                case Truck::Hydro::OPTION_r_INPUT_RUDDER:  // 'r':
                     hydro_flags |= HYDRO_FLAG_RUDDER;
                     break;
-                case RigDef::Hydro::OPTION_e_INPUT_ELEVATOR:  // 'e':
+                case Truck::Hydro::OPTION_e_INPUT_ELEVATOR:  // 'e':
                     hydro_flags |= HYDRO_FLAG_ELEVATOR;
                     break;
-                case RigDef::Hydro::OPTION_u_INPUT_AILERON_ELEVATOR:  // 'u':
+                case Truck::Hydro::OPTION_u_INPUT_AILERON_ELEVATOR:  // 'u':
                     hydro_flags |= (HYDRO_FLAG_AILERON | HYDRO_FLAG_ELEVATOR);
                     break;
-                case RigDef::Hydro::OPTION_v_INPUT_InvAILERON_ELEVATOR:  // 'v':
+                case Truck::Hydro::OPTION_v_INPUT_InvAILERON_ELEVATOR:  // 'v':
                     hydro_flags |= (HYDRO_FLAG_REV_AILERON | HYDRO_FLAG_ELEVATOR);
                     break;
-                case RigDef::Hydro::OPTION_x_INPUT_AILERON_RUDDER:  // 'x':
+                case Truck::Hydro::OPTION_x_INPUT_AILERON_RUDDER:  // 'x':
                     hydro_flags |= (HYDRO_FLAG_AILERON | HYDRO_FLAG_RUDDER);
                     break;
-                case RigDef::Hydro::OPTION_y_INPUT_InvAILERON_RUDDER:  // 'y':
+                case Truck::Hydro::OPTION_y_INPUT_InvAILERON_RUDDER:  // 'y':
                     hydro_flags |= (HYDRO_FLAG_REV_AILERON | HYDRO_FLAG_RUDDER);
                     break;
-                case RigDef::Hydro::OPTION_g_INPUT_ELEVATOR_RUDDER:  // 'g':
+                case Truck::Hydro::OPTION_g_INPUT_ELEVATOR_RUDDER:  // 'g':
                     hydro_flags |= (HYDRO_FLAG_ELEVATOR | HYDRO_FLAG_RUDDER);
                     break;
-                case RigDef::Hydro::OPTION_h_INPUT_InvELEVATOR_RUDDER:  // 'h':
+                case Truck::Hydro::OPTION_h_INPUT_InvELEVATOR_RUDDER:  // 'h':
                     hydro_flags |= (HYDRO_FLAG_REV_ELEVATOR | HYDRO_FLAG_RUDDER);
                     break;
                 default:
@@ -3668,20 +3499,19 @@ void ActorSpawner::ProcessHydro(RigDef::Hydro & def)
         }
     }
 
-    node_t & node_1 = GetNode(def.nodes[0]);
-    node_t & node_2 = GetNode(def.nodes[1]);
 
+    // Set up beam
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(node_1, node_2, def.beam_defaults, def.detacher_group);
-    SetBeamStrength(beam, def.beam_defaults->GetScaledBreakingThreshold());
+    beam_t & beam = AddBeam(def.nodes[0], def.nodes[1]);
     CalculateBeamLength(beam);
     beam.bm_type              = BEAM_HYDRO;
-    beam.k                    = def.beam_defaults->GetScaledSpringiness();
-    beam.d                    = def.beam_defaults->GetScaledDamping();
+    beam.strength             = m_state.default_break * m_state.default_break_scale;
+    beam.k                    = m_state.default_spring * m_state.default_spring_scale;
+    beam.d                    = m_state.default_damp * m_state.default_damp_scale;
 
     if (!invisible)
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
     hydrobeam_t hb;
@@ -3691,26 +3521,28 @@ void ActorSpawner::ProcessHydro(RigDef::Hydro & def)
     hb.hb_ref_length = beam.L;
     hb.hb_anim_flags = 0;
     hb.hb_anim_param = 0.f;
-    this->_ProcessKeyInertia(def.inertia, *def.inertia_defaults, hb.hb_inertia, hb.hb_inertia);
+    this->_ProcessKeyInertia(def.inertia, hb.hb_inertia, hb.hb_inertia);
 
     m_actor->ar_hydros.push_back(hb);
 }
 
-void ActorSpawner::ProcessShock3(RigDef::Shock3 & def)
+void ActorSpawner::ProcessShock3(Truck::Shock3 & def)
 {
+
+
     node_t & node_1 = GetNode(def.nodes[0]);
     node_t & node_2 = GetNode(def.nodes[1]);
     float short_bound = def.short_bound;
     float long_bound = def.long_bound;
     unsigned int shock_flags = SHOCK_FLAG_NORMAL | SHOCK_FLAG_ISSHOCK3;
 
-    if (BITMASK_IS_1(def.options, RigDef::Shock3::OPTION_m_METRIC))
+    if (BITMASK_IS_1(def.options, Truck::Shock3::OPTION_m_METRIC))
     {
         float beam_length = node_1.AbsPosition.distance(node_2.AbsPosition);
         short_bound /= beam_length;
         long_bound /= beam_length;
     }
-    if (BITMASK_IS_1(def.options, RigDef::Shock3::OPTION_M_ABSOLUTE_METRIC))
+    if (BITMASK_IS_1(def.options, Truck::Shock3::OPTION_M_ABSOLUTE_METRIC))
     {
         float beam_length = node_1.AbsPosition.distance(node_2.AbsPosition);
         short_bound = (beam_length - short_bound) / beam_length;
@@ -3734,10 +3566,11 @@ void ActorSpawner::ProcessShock3(RigDef::Shock3 & def)
             short_bound = 1.f;
         }
     }
-    
+
+
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(node_1, node_2, def.beam_defaults, def.detacher_group);
-    SetBeamStrength(beam, def.beam_defaults->breaking_threshold * 4.f);
+    beam_t & beam = AddBeam(node_1, node_2);
+    beam.strength = m_state.default_break * m_state.default_break_scale;
     beam.bm_type              = BEAM_HYDRO;
     beam.bounded              = SHOCK3;
     beam.k                    = def.spring_in;
@@ -3750,15 +3583,15 @@ void ActorSpawner::ProcessShock3(RigDef::Shock3 & def)
     beam.L          *= def.precompression;
     beam.refL       *= def.precompression;
 
-    if (BITMASK_IS_0(def.options, RigDef::Shock3::OPTION_i_INVISIBLE))
+    if (BITMASK_IS_0(def.options, Truck::Shock3::OPTION_i_INVISIBLE))
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
     shock_t & shock  = GetFreeShock();
     shock.flags      = shock_flags;
-    shock.sbd_spring = def.beam_defaults->springiness;
-    shock.sbd_damp   = def.beam_defaults->damping_constant;
+    shock.sbd_spring = m_state.default_spring;
+    shock.sbd_damp   = m_state.default_damp;
     shock.springin   = def.spring_in;
     shock.dampin     = def.damp_in;
     shock.springout  = def.spring_out;
@@ -3774,7 +3607,7 @@ void ActorSpawner::ProcessShock3(RigDef::Shock3 & def)
     shock.beamid = beam_index;
 }
 
-void ActorSpawner::ProcessShock2(RigDef::Shock2 & def)
+void ActorSpawner::ProcessShock2(Truck::Shock2 & def)
 {
     node_t & node_1 = GetNode(def.nodes[0]);
     node_t & node_2 = GetNode(def.nodes[1]);
@@ -3782,18 +3615,18 @@ void ActorSpawner::ProcessShock2(RigDef::Shock2 & def)
     float long_bound = def.long_bound;
     unsigned int shock_flags = SHOCK_FLAG_NORMAL | SHOCK_FLAG_ISSHOCK2;
 
-    if (BITMASK_IS_1(def.options, RigDef::Shock2::OPTION_s_SOFT_BUMP_BOUNDS))
+    if (BITMASK_IS_1(def.options, Truck::Shock2::OPTION_s_SOFT_BUMP_BOUNDS))
     {
         BITMASK_SET_0(shock_flags, SHOCK_FLAG_NORMAL); /* Not normal anymore */
         BITMASK_SET_1(shock_flags, SHOCK_FLAG_SOFTBUMP);
     }
-    if (BITMASK_IS_1(def.options, RigDef::Shock2::OPTION_m_METRIC))
+    if (BITMASK_IS_1(def.options, Truck::Shock2::OPTION_m_METRIC))
     {
         float beam_length = node_1.AbsPosition.distance(node_2.AbsPosition);
         short_bound /= beam_length;
         long_bound /= beam_length;
     }
-    if (BITMASK_IS_1(def.options, RigDef::Shock2::OPTION_M_ABSOLUTE_METRIC))
+    if (BITMASK_IS_1(def.options, Truck::Shock2::OPTION_M_ABSOLUTE_METRIC))
     {
         float beam_length = node_1.AbsPosition.distance(node_2.AbsPosition);
         short_bound = (beam_length - short_bound) / beam_length;
@@ -3817,10 +3650,12 @@ void ActorSpawner::ProcessShock2(RigDef::Shock2 & def)
             short_bound = 1.f;
         }
     }
-    
+
+
+    // Set up beam
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(node_1, node_2, def.beam_defaults, def.detacher_group);
-    SetBeamStrength(beam, def.beam_defaults->breaking_threshold * 4.f);
+    beam_t & beam = AddBeam(node_1, node_2);
+    beam.strength             = m_state.default_break * m_state.default_break_scale;
     beam.bm_type              = BEAM_HYDRO;
     beam.bounded              = SHOCK2;
     beam.k                    = def.spring_in;
@@ -3833,15 +3668,15 @@ void ActorSpawner::ProcessShock2(RigDef::Shock2 & def)
     beam.L          *= def.precompression;
     beam.refL       *= def.precompression;
 
-    if (BITMASK_IS_0(def.options, RigDef::Shock2::OPTION_i_INVISIBLE))
+    if (BITMASK_IS_0(def.options, Truck::Shock2::OPTION_i_INVISIBLE))
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
     shock_t & shock  = GetFreeShock();
     shock.flags      = shock_flags;
-    shock.sbd_spring = def.beam_defaults->springiness;
-    shock.sbd_damp   = def.beam_defaults->damping_constant;
+    shock.sbd_spring = m_state.default_spring;
+    shock.sbd_damp   = m_state.default_damp;
     shock.springin   = def.spring_in;
     shock.dampin     = def.damp_in;
     shock.springout  = def.spring_out;
@@ -3855,42 +3690,44 @@ void ActorSpawner::ProcessShock2(RigDef::Shock2 & def)
     shock.beamid = beam_index;
 }
 
-void ActorSpawner::ProcessShock(RigDef::Shock & def)
+void ActorSpawner::ProcessShock(Truck::Shock & def)
 {
-    node_t & node_1 = GetNode(def.nodes[0]);
-    node_t & node_2 = GetNode(def.nodes[1]);
+
+    // Set up beam
+    int beam_index = m_actor->ar_num_beams;
+    beam_t & beam = AddBeam(def.nodes[0], def.nodes[1]);
+
+    // Resolve options
     float short_bound = def.short_bound;
     float long_bound = def.long_bound;
     unsigned int shock_flags = SHOCK_FLAG_NORMAL;
 
-    if (BITMASK_IS_1(def.options, RigDef::Shock::OPTION_L_ACTIVE_LEFT))
+    if (BITMASK_IS_1(def.options, Truck::Shock::OPTION_L_ACTIVE_LEFT))
     {
         BITMASK_SET_0(shock_flags, SHOCK_FLAG_NORMAL); /* Not normal anymore */
         BITMASK_SET_1(shock_flags, SHOCK_FLAG_LACTIVE);
         m_actor->ar_has_active_shocks = true;
     }
-    if (BITMASK_IS_1(def.options, RigDef::Shock::OPTION_R_ACTIVE_RIGHT))
+    if (BITMASK_IS_1(def.options, Truck::Shock::OPTION_R_ACTIVE_RIGHT))
     {
         BITMASK_SET_0(shock_flags, SHOCK_FLAG_NORMAL); /* Not normal anymore */
         BITMASK_SET_1(shock_flags, SHOCK_FLAG_RACTIVE);
         m_actor->ar_has_active_shocks = true;
     }
-    if (BITMASK_IS_1(def.options, RigDef::Shock::OPTION_m_METRIC))
+    if (BITMASK_IS_1(def.options, Truck::Shock::OPTION_m_METRIC))
     {
-        float beam_length = node_1.AbsPosition.distance(node_2.AbsPosition);
+        float beam_length = beam.p1->AbsPosition.distance(beam.p2->AbsPosition);
         short_bound /= beam_length;
         long_bound /= beam_length;
     }
-    
-    int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(node_1, node_2, def.beam_defaults, def.detacher_group);
+
     beam.shortbound = short_bound;
     beam.longbound  = long_bound;
     beam.bounded    = SHOCK1;
     beam.bm_type    = BEAM_HYDRO;
     beam.k          = def.spring_rate;
     beam.d          = def.damping;
-    SetBeamStrength(beam, def.beam_defaults->breaking_threshold * 4.f);
+    SetBeamStrength(beam, m_state.default_break * 4.f);
 
     /* Length + pre-compression */
     CalculateBeamLength(beam);
@@ -3899,12 +3736,12 @@ void ActorSpawner::ProcessShock(RigDef::Shock & def)
 
     shock_t & shock  = GetFreeShock();
     shock.flags      = shock_flags;
-    shock.sbd_spring = def.beam_defaults->springiness;
-    shock.sbd_damp   = def.beam_defaults->damping_constant;
+    shock.sbd_spring = m_state.default_spring;
+    shock.sbd_damp   = m_state.default_damp;
 
-    if (BITMASK_IS_0(def.options, RigDef::Shock::OPTION_i_INVISIBLE))
+    if (BITMASK_IS_0(def.options, Truck::Shock::OPTION_i_INVISIBLE))
     {
-        this->CreateBeamVisuals(beam, beam_index, true, def.beam_defaults);
+        this->CreateBeamVisuals(beam, beam_index, true);
     }
 
     beam.shock = & shock;
@@ -3914,8 +3751,8 @@ void ActorSpawner::ProcessShock(RigDef::Shock & def)
 void ActorSpawner::FetchAxisNodes(
     node_t* & axis_node_1, 
     node_t* & axis_node_2, 
-    RigDef::Node::Ref const & axis_node_1_id,
-    RigDef::Node::Ref const & axis_node_2_id
+    Truck::Node::Ref const & axis_node_1_id,
+    Truck::Node::Ref const & axis_node_2_id
 )
 {
     axis_node_1 = GetNodePointer(axis_node_1_id);
@@ -3933,7 +3770,7 @@ void ActorSpawner::FetchAxisNodes(
     }
 }
 
-void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
+void ActorSpawner::ProcessFlexBodyWheel(Truck::FlexBodyWheel & def)
 {
     unsigned int base_node_index = m_actor->ar_num_nodes;
     wheel_t & wheel = m_actor->ar_wheels[m_actor->ar_num_wheels];
@@ -3970,13 +3807,13 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         rim_ray_vector = rim_ray_rotator * rim_ray_vector;
 
         node_t & outer_node      = GetFreeNode();
-        InitNode(outer_node, ray_point, def.node_defaults);
+        InitNode(outer_node, ray_point);
 
         outer_node.mass          = node_mass;
-        outer_node.friction_coef = def.node_defaults->friction;
+        outer_node.friction_coef = m_state.default_node_friction;
         outer_node.nd_rim_node   = true;
-        AdjustNodeBuoyancy(outer_node, def.node_defaults);
-        m_actor->ar_minimass[outer_node.pos] = m_file->global_minimass->min_mass;
+        AdjustNodeBuoyancy(outer_node);
+        m_actor->ar_minimass[outer_node.pos] = m_state.default_minimass;
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
@@ -3985,13 +3822,13 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         rim_ray_vector = rim_ray_rotator * rim_ray_vector;
 
         node_t & inner_node      = GetFreeNode();
-        InitNode(inner_node, ray_point, def.node_defaults);
+        InitNode(inner_node, ray_point);
 
         inner_node.mass          = node_mass;
-        inner_node.friction_coef = def.node_defaults->friction;
+        inner_node.friction_coef = m_state.default_node_friction;
         inner_node.nd_rim_node   = true;
-        AdjustNodeBuoyancy(inner_node, def.node_defaults);
-        m_actor->ar_minimass[inner_node.pos] = m_file->global_minimass->min_mass;
+        AdjustNodeBuoyancy(inner_node);
+        m_actor->ar_minimass[inner_node.pos] = m_state.default_minimass;
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
@@ -4015,12 +3852,12 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         node_t & outer_node = GetFreeNode();
         InitNode(outer_node, ray_point);
         outer_node.mass          = node_mass;
-        outer_node.friction_coef = def.node_defaults->friction;
-        outer_node.volume_coef   = def.node_defaults->volume;
-        outer_node.surface_coef  = def.node_defaults->surface;
+        outer_node.friction_coef = m_state.default_node_friction;
+        outer_node.volume_coef   = m_state.default_node_volume;
+        outer_node.surface_coef  = m_state.default_node_surface;
         outer_node.nd_contacter  = true;
         outer_node.nd_tyre_node  = true;
-        AdjustNodeBuoyancy(outer_node, def.node_defaults);
+        AdjustNodeBuoyancy(outer_node);
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
@@ -4031,12 +3868,12 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         node_t & inner_node = GetFreeNode();
         InitNode(inner_node, ray_point);
         inner_node.mass          = node_mass;
-        inner_node.friction_coef = def.node_defaults->friction;
-        inner_node.volume_coef   = def.node_defaults->volume;
-        inner_node.surface_coef  = def.node_defaults->surface;
+        inner_node.friction_coef = m_state.default_node_friction;
+        inner_node.volume_coef   = m_state.default_node_surface;
+        inner_node.surface_coef  = m_state.default_node_surface;
         inner_node.nd_contacter  = true;
         inner_node.nd_tyre_node  = true;
-        AdjustNodeBuoyancy(inner_node, def.node_defaults);
+        AdjustNodeBuoyancy(inner_node);
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
@@ -4050,8 +3887,8 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
     float rim_damp = def.rim_damping;
     float tyre_spring = def.tyre_springiness;
     float tyre_damp = def.tyre_damping;
-    float tread_spring = def.beam_defaults->springiness;
-    float tread_damp = def.beam_defaults->damping_constant;
+    float tread_spring = m_state.default_spring;
+    float tread_damp = m_state.default_damp;
 
     for (unsigned int i = 0; i < def.num_rays; i++)
     {
@@ -4062,20 +3899,20 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         node_t *rim_outer_node = & m_actor->ar_nodes[rim_outer_node_index];
         node_t *rim_inner_node = & m_actor->ar_nodes[rim_outer_node_index + 1];
 
-        AddWheelBeam(axis_node_1, rim_outer_node, rim_spring, rim_damp, def.beam_defaults);
-        AddWheelBeam(axis_node_2, rim_inner_node, rim_spring, rim_damp, def.beam_defaults);
-        AddWheelBeam(axis_node_2, rim_outer_node, rim_spring, rim_damp, def.beam_defaults);
-        AddWheelBeam(axis_node_1, rim_inner_node, rim_spring, rim_damp, def.beam_defaults);
+        AddWheelBeam(axis_node_1, rim_outer_node, rim_spring, rim_damp);
+        AddWheelBeam(axis_node_2, rim_inner_node, rim_spring, rim_damp);
+        AddWheelBeam(axis_node_2, rim_outer_node, rim_spring, rim_damp);
+        AddWheelBeam(axis_node_1, rim_inner_node, rim_spring, rim_damp);
 
         // Reinforcement rim ring
         unsigned int rim_next_outer_node_index = base_node_index + (((i + 1) % def.num_rays) * 2);
         node_t *rim_next_outer_node = & m_actor->ar_nodes[rim_next_outer_node_index];
         node_t *rim_next_inner_node = & m_actor->ar_nodes[rim_next_outer_node_index + 1];
 
-        AddWheelBeam(rim_outer_node, rim_inner_node,      rim_spring, rim_damp, def.beam_defaults);
-        AddWheelBeam(rim_outer_node, rim_next_outer_node, rim_spring, rim_damp, def.beam_defaults);
-        AddWheelBeam(rim_inner_node, rim_next_inner_node, rim_spring, rim_damp, def.beam_defaults);
-        AddWheelBeam(rim_inner_node, rim_next_outer_node, rim_spring, rim_damp, def.beam_defaults);
+        AddWheelBeam(rim_outer_node, rim_inner_node,      rim_spring, rim_damp);
+        AddWheelBeam(rim_outer_node, rim_next_outer_node, rim_spring, rim_damp);
+        AddWheelBeam(rim_inner_node, rim_next_inner_node, rim_spring, rim_damp);
+        AddWheelBeam(rim_inner_node, rim_next_outer_node, rim_spring, rim_damp);
     }
 
     // Tyre beams
@@ -4086,20 +3923,20 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         int tyre_node_index   = base_node_index + i*2 + def.num_rays*2;
         node_t * rim_node     = & m_actor->ar_nodes[rim_node_index];
 
-        AddWheelBeam(rim_node, & m_actor->ar_nodes[tyre_node_index], tyre_spring/2.f, tyre_damp, def.beam_defaults);
+        AddWheelBeam(rim_node, & m_actor->ar_nodes[tyre_node_index], tyre_spring/2.f, tyre_damp);
 
         int tyre_base_index = (i == 0) ? tyre_node_index + (def.num_rays * 2) : tyre_node_index;
-        AddWheelBeam(rim_node, & m_actor->ar_nodes[tyre_base_index - 1], tyre_spring/2.f, tyre_damp, def.beam_defaults);
-        AddWheelBeam(rim_node, & m_actor->ar_nodes[tyre_base_index - 2], tyre_spring/2.f, tyre_damp, def.beam_defaults);
+        AddWheelBeam(rim_node, & m_actor->ar_nodes[tyre_base_index - 1], tyre_spring/2.f, tyre_damp);
+        AddWheelBeam(rim_node, & m_actor->ar_nodes[tyre_base_index - 2], tyre_spring/2.f, tyre_damp);
 
         node_t * next_rim_node = & m_actor->ar_nodes[rim_node_index + 1];
-        AddWheelBeam(next_rim_node, & m_actor->ar_nodes[tyre_node_index],     tyre_spring/2.f, tyre_damp, def.beam_defaults);
-        AddWheelBeam(next_rim_node, & m_actor->ar_nodes[tyre_node_index + 1], tyre_spring/2.f, tyre_damp, def.beam_defaults);
+        AddWheelBeam(next_rim_node, & m_actor->ar_nodes[tyre_node_index],     tyre_spring/2.f, tyre_damp);
+        AddWheelBeam(next_rim_node, & m_actor->ar_nodes[tyre_node_index + 1], tyre_spring/2.f, tyre_damp);
 
         {
             int index = (i == 0) ? tyre_node_index + (def.num_rays * 2) - 1 : tyre_node_index - 1;
             node_t * tyre_node = & m_actor->ar_nodes[index];
-            AddWheelBeam(next_rim_node, tyre_node, tyre_spring/2.f, tyre_damp, def.beam_defaults);
+            AddWheelBeam(next_rim_node, tyre_node, tyre_spring/2.f, tyre_damp);
         }
 
         //reinforcement (tire tread)
@@ -4109,10 +3946,10 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
             int rimnode = rim_node_index;
             int rays = def.num_rays;
 
-            AddWheelBeam(&m_actor->ar_nodes[rimnode+rays*2], &m_actor->ar_nodes[base_node_index+i*2+1+rays*2], tread_spring, tread_damp, def.beam_defaults);
-            AddWheelBeam(&m_actor->ar_nodes[rimnode+rays*2], &m_actor->ar_nodes[base_node_index+((i+1)%rays)*2+rays*2], tread_spring, tread_damp, def.beam_defaults);
-            AddWheelBeam(&m_actor->ar_nodes[base_node_index+i*2+1+rays*2], &m_actor->ar_nodes[base_node_index+((i+1)%rays)*2+1+rays*2], tread_spring, tread_damp, def.beam_defaults);
-            AddWheelBeam(&m_actor->ar_nodes[rimnode+1+rays*2], &m_actor->ar_nodes[base_node_index+((i+1)%rays)*2+rays*2], tread_spring, tread_damp, def.beam_defaults);
+            AddWheelBeam(&m_actor->ar_nodes[rimnode+rays*2], &m_actor->ar_nodes[base_node_index+i*2+1+rays*2], tread_spring, tread_damp);
+            AddWheelBeam(&m_actor->ar_nodes[rimnode+rays*2], &m_actor->ar_nodes[base_node_index+((i+1)%rays)*2+rays*2], tread_spring, tread_damp);
+            AddWheelBeam(&m_actor->ar_nodes[base_node_index+i*2+1+rays*2], &m_actor->ar_nodes[base_node_index+((i+1)%rays)*2+1+rays*2], tread_spring, tread_damp);
+            AddWheelBeam(&m_actor->ar_nodes[rimnode+1+rays*2], &m_actor->ar_nodes[base_node_index+((i+1)%rays)*2+rays*2], tread_spring, tread_damp);
 
             if (rigidity_node != nullptr)
             {
@@ -4123,7 +3960,7 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
                 {
                     axis_node_closest_to_rigidity_node = & m_actor->ar_nodes[base_node_index+i*2+1+rays*2];
                 };
-                unsigned int beam_index = AddWheelBeam(rigidity_node, axis_node_closest_to_rigidity_node, tyre_spring, tyre_damp, def.beam_defaults);
+                unsigned int beam_index = AddWheelBeam(rigidity_node, axis_node_closest_to_rigidity_node, tyre_spring, tyre_damp);
                 GetBeam(beam_index).bm_type = BEAM_VIRTUAL;
             }
         }
@@ -4140,12 +3977,12 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
         unsigned int tirenode = base_node_index + i*2 + def.num_rays*2;
         unsigned int beam_index;
 
-        beam_index = AddWheelBeam(axis_node_1, &m_actor->ar_nodes[tirenode],     tyre_spring/2.f, tyre_damp, def.beam_defaults);
+        beam_index = AddWheelBeam(axis_node_1, &m_actor->ar_nodes[tirenode],     tyre_spring/2.f, tyre_damp);
         GetBeam(beam_index).shortbound = support_beams_short_bound;
         GetBeam(beam_index).longbound  = 0.f;
         GetBeam(beam_index).bounded = SHOCK1;
 
-        beam_index = AddWheelBeam(axis_node_2, &m_actor->ar_nodes[tirenode + 1], tyre_spring/2.f, tyre_damp, def.beam_defaults);
+        beam_index = AddWheelBeam(axis_node_2, &m_actor->ar_nodes[tirenode + 1], tyre_spring/2.f, tyre_damp);
         GetBeam(beam_index).shortbound = support_beams_short_bound;
         GetBeam(beam_index).longbound  = 0.f;
         GetBeam(beam_index).bounded = SHOCK1;
@@ -4162,7 +3999,7 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
     wheel.wh_rim_radius = def.rim_radius;
     wheel.wh_arm_node = this->GetNodePointer(def.reference_arm_node);
 
-    if (def.propulsion != RigDef::Wheels::PROPULSION_NONE)
+    if (def.propulsion != Truck::Wheels::PROPULSION_NONE)
     {
         // for inter-differential locking
         m_actor->m_proped_wheel_pairs[m_actor->m_num_proped_wheels] = m_actor->ar_num_wheels;
@@ -4182,26 +4019,27 @@ void ActorSpawner::ProcessFlexBodyWheel(RigDef::FlexBodyWheel & def)
     m_wheel_visuals_queue.push_back(WheelVisualsTicket(wheel_index, base_node_index, &def, axis_node_1->pos, axis_node_2->pos));
 }
 
-wheel_t::BrakeCombo ActorSpawner::TranslateBrakingDef(RigDef::Wheels::Braking def)
+wheel_t::BrakeCombo ActorSpawner::TranslateBrakingDef(Truck::Wheels::Braking def)
 {
     switch (def)
     {
-    case RigDef::Wheels::Braking::BRAKING_NO:                return wheel_t::BrakeCombo::NONE;
-    case RigDef::Wheels::Braking::BRAKING_YES:               return wheel_t::BrakeCombo::FOOT_HAND;
-    case RigDef::Wheels::Braking::BRAKING_DIRECTIONAL_LEFT:  return wheel_t::BrakeCombo::FOOT_HAND_SKID_LEFT;
-    case RigDef::Wheels::Braking::BRAKING_DIRECTIONAL_RIGHT: return wheel_t::BrakeCombo::FOOT_HAND_SKID_RIGHT;
-    case RigDef::Wheels::Braking::BRAKING_ONLY_FOOT:         return wheel_t::BrakeCombo::FOOT_ONLY;
+    case Truck::Wheels::Braking::BRAKING_NO:                return wheel_t::BrakeCombo::NONE;
+    case Truck::Wheels::Braking::BRAKING_YES:               return wheel_t::BrakeCombo::FOOT_HAND;
+    case Truck::Wheels::Braking::BRAKING_DIRECTIONAL_LEFT:  return wheel_t::BrakeCombo::FOOT_HAND_SKID_LEFT;
+    case Truck::Wheels::Braking::BRAKING_DIRECTIONAL_RIGHT: return wheel_t::BrakeCombo::FOOT_HAND_SKID_RIGHT;
+    case Truck::Wheels::Braking::BRAKING_ONLY_FOOT:         return wheel_t::BrakeCombo::FOOT_ONLY;
     default:                                                 return wheel_t::BrakeCombo::NONE;
     }
 }
 
-void ActorSpawner::ProcessMeshWheel(RigDef::MeshWheel & meshwheel_def)
+void ActorSpawner::ProcessMeshWheel(Truck::MeshWheel & meshwheel_def)
 {
     if (meshwheel_def._is_meshwheel2)
     {
         this->ProcessMeshWheel2(meshwheel_def);
         return;
     }
+
 
     unsigned int base_node_index = m_actor->ar_num_nodes;
     node_t *axis_node_1 = GetNodePointer(meshwheel_def.nodes[0]);
@@ -4228,7 +4066,6 @@ void ActorSpawner::ProcessMeshWheel(RigDef::MeshWheel & meshwheel_def)
         meshwheel_def.tyre_radius,
         meshwheel_def.propulsion,
         meshwheel_def.braking,
-        meshwheel_def.node_defaults,
         meshwheel_def.mass
     );
 
@@ -4241,7 +4078,6 @@ void ActorSpawner::ProcessMeshWheel(RigDef::MeshWheel & meshwheel_def)
         meshwheel_def.damping,     /* Tyre */
         meshwheel_def.spring,      /* Rim */
         meshwheel_def.damping,     /* Rim */
-        meshwheel_def.beam_defaults,
         meshwheel_def.rigidity_node
     );
 
@@ -4251,8 +4087,9 @@ void ActorSpawner::ProcessMeshWheel(RigDef::MeshWheel & meshwheel_def)
     CreateWheelSkidmarks(wheel_index);
 }
 
-void ActorSpawner::ProcessMeshWheel2(RigDef::MeshWheel & def)
+void ActorSpawner::ProcessMeshWheel2(Truck::MeshWheel & def)
 {
+
     unsigned int base_node_index = m_actor->ar_num_nodes;
     node_t *axis_node_1 = GetNodePointer(def.nodes[0]);
     node_t *axis_node_2 = GetNodePointer(def.nodes[1]);
@@ -4284,7 +4121,6 @@ void ActorSpawner::ProcessMeshWheel2(RigDef::MeshWheel & def)
         def.tyre_radius,
         def.propulsion,
         def.braking,
-        def.node_defaults,
         def.mass
     );
 
@@ -4292,8 +4128,8 @@ void ActorSpawner::ProcessMeshWheel2(RigDef::MeshWheel & def)
     /* Use data from directive 'set_beam_defaults' for the tiretread beams */
     float tyre_spring = def.spring;
     float tyre_damp = def.damping;
-    float rim_spring = def.beam_defaults->springiness;
-    float rim_damp = def.beam_defaults->damping_constant;
+    float rim_spring = m_state.default_spring;
+    float rim_damp = m_state.default_damp;
 
     BuildWheelBeams(
         def.num_rays,
@@ -4304,9 +4140,8 @@ void ActorSpawner::ProcessMeshWheel2(RigDef::MeshWheel & def)
         tyre_damp,
         rim_spring,
         rim_damp,
-        def.beam_defaults,
         def.rigidity_node,
-        0.15 // max_extension
+        /*max_extension:*/0.15
     );
 
     m_wheel_visuals_queue.push_back(WheelVisualsTicket(
@@ -4363,9 +4198,8 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
     unsigned int reserve_nodes,
     unsigned int reserve_beams,
     float wheel_radius,
-    RigDef::Wheels::Propulsion propulsion,
-    RigDef::Wheels::Braking braking,
-    std::shared_ptr<RigDef::NodeDefaults> node_defaults,
+    Truck::Wheels::Propulsion propulsion,
+    Truck::Wheels::Braking braking,
     float wheel_mass,
     float wheel_width       /* Default: -1.f */
 )
@@ -4392,7 +4226,7 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
     Ogre::Real length_2 = (axis_node_2->RelPosition - wheel.wh_arm_node->RelPosition).length();
     wheel.wh_near_attach_node = (length_1 < length_2) ? axis_node_1 : axis_node_2;
 
-    if (propulsion != RigDef::Wheels::PROPULSION_NONE)
+    if (propulsion != Truck::Wheels::PROPULSION_NONE)
     {
         /* for inter-differential locking */
         m_actor->m_proped_wheel_pairs[m_actor->m_num_proped_wheels] = m_actor->ar_num_wheels;
@@ -4418,11 +4252,10 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
         ray_vector = ray_rotator * ray_vector;
 
         node_t & outer_node = GetFreeNode();
-        InitNode(outer_node, ray_point, node_defaults);
+        InitNode(outer_node, ray_point);
         outer_node.mass          = wheel_mass / (2.f * num_rays);
         outer_node.nd_contacter  = true;
         outer_node.nd_tyre_node  = true;
-        AdjustNodeBuoyancy(outer_node, node_defaults);
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
@@ -4431,11 +4264,10 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
         ray_vector = ray_rotator * ray_vector;
 
         node_t & inner_node = GetFreeNode();
-        InitNode(inner_node, ray_point, node_defaults);
+        InitNode(inner_node, ray_point);
         inner_node.mass          = wheel_mass / (2.f * num_rays);
         inner_node.nd_contacter  = true;
         inner_node.nd_tyre_node  = true;
-        AdjustNodeBuoyancy(inner_node, node_defaults);
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
@@ -4466,15 +4298,15 @@ unsigned int ActorSpawner::BuildWheelObjectAndNodes(
     return wheel_index;
 }
 
-void ActorSpawner::AdjustNodeBuoyancy(node_t & node, RigDef::Node & node_def, std::shared_ptr<RigDef::NodeDefaults> defaults)
+void ActorSpawner::AdjustNodeBuoyancy(node_t & node, Truck::Node & node_def)
 {
-    unsigned int options = (defaults->options | node_def.options); // Merge flags
-    node.buoyancy = BITMASK_IS_1(options, RigDef::Node::OPTION_b_EXTRA_BUOYANCY) ? 10000.f : m_actor->m_dry_mass/15.f;
+    std::string options = node_def.options + m_state.default_node_options; // Merge options
+    node.buoyancy = (options.find(Truck::Node::OPTION_b_EXTRA_BUOYANCY)!=std::string::npos) ? 10000.f : m_actor->m_dry_mass/15.f;
 }
 
-void ActorSpawner::AdjustNodeBuoyancy(node_t & node, std::shared_ptr<RigDef::NodeDefaults> defaults)
+void ActorSpawner::AdjustNodeBuoyancy(node_t & node)
 {
-    node.buoyancy = BITMASK_IS_1(defaults->options, RigDef::Node::OPTION_b_EXTRA_BUOYANCY) ? 10000.f : m_actor->m_dry_mass/15.f;
+    node.buoyancy = (m_state.default_node_options.find(Truck::Node::OPTION_b_EXTRA_BUOYANCY)!=std::string::npos) ? 10000.f : m_actor->m_dry_mass/15.f;
 }
 
 void ActorSpawner::BuildWheelBeams(
@@ -4486,8 +4318,7 @@ void ActorSpawner::BuildWheelBeams(
     float tyre_damping,
     float rim_spring,
     float rim_damping,
-    std::shared_ptr<RigDef::BeamDefaults> beam_defaults,
-    RigDef::Node::Ref const & rigidity_node_id,
+    Truck::Node::Ref const & rigidity_node_id,
     float max_extension // = 0.f
 )
 {
@@ -4509,32 +4340,32 @@ void ActorSpawner::BuildWheelBeams(
         node_t *outer_ring_node = & m_actor->ar_nodes[outer_ring_node_index];
         node_t *inner_ring_node = & m_actor->ar_nodes[outer_ring_node_index + 1];
         
-        AddWheelBeam(axis_node_1, outer_ring_node, tyre_spring, tyre_damping, beam_defaults, 0.66f, max_extension);
-        AddWheelBeam(axis_node_2, inner_ring_node, tyre_spring, tyre_damping, beam_defaults, 0.66f, max_extension);
-        AddWheelBeam(axis_node_2, outer_ring_node, tyre_spring, tyre_damping, beam_defaults);
-        AddWheelBeam(axis_node_1, inner_ring_node, tyre_spring, tyre_damping, beam_defaults);
+        AddWheelBeam(axis_node_1, outer_ring_node, tyre_spring, tyre_damping,  0.66f, max_extension);
+        AddWheelBeam(axis_node_2, inner_ring_node, tyre_spring, tyre_damping,  0.66f, max_extension);
+        AddWheelBeam(axis_node_2, outer_ring_node, tyre_spring, tyre_damping);
+        AddWheelBeam(axis_node_1, inner_ring_node, tyre_spring, tyre_damping);
 
         /* Reinforcement */
         unsigned int next_outer_ring_node_index = base_node_index + (((i + 1) % num_rays) * 2);
         node_t *next_outer_ring_node = & m_actor->ar_nodes[next_outer_ring_node_index];
         node_t *next_inner_ring_node = & m_actor->ar_nodes[next_outer_ring_node_index + 1];
 
-        AddWheelBeam(outer_ring_node, inner_ring_node,      rim_spring, rim_damping, beam_defaults);
-        AddWheelBeam(outer_ring_node, next_outer_ring_node, rim_spring, rim_damping, beam_defaults);
-        AddWheelBeam(inner_ring_node, next_inner_ring_node, rim_spring, rim_damping, beam_defaults);
-        AddWheelBeam(inner_ring_node, next_outer_ring_node, rim_spring, rim_damping, beam_defaults);
+        AddWheelBeam(outer_ring_node, inner_ring_node,      rim_spring, rim_damping);
+        AddWheelBeam(outer_ring_node, next_outer_ring_node, rim_spring, rim_damping);
+        AddWheelBeam(inner_ring_node, next_inner_ring_node, rim_spring, rim_damping);
+        AddWheelBeam(inner_ring_node, next_outer_ring_node, rim_spring, rim_damping);
 
         /* Rigidity beams */
         if (rigidity_node != nullptr)
         {
             node_t *target_node = (rigidity_beam_side_1) ? outer_ring_node : inner_ring_node;
-            unsigned int beam_index = AddWheelBeam(rigidity_node, target_node, tyre_spring, tyre_damping, beam_defaults, -1.f, -1.f, BEAM_VIRTUAL);
+            unsigned int beam_index = AddWheelBeam(rigidity_node, target_node, tyre_spring, tyre_damping, -1.f, -1.f, BEAM_VIRTUAL);
             m_actor->ar_beams[beam_index].bm_type = BEAM_VIRTUAL;
         }
     }
 }
 
-unsigned int ActorSpawner::AddWheel(RigDef::Wheel & wheel_def)
+unsigned int ActorSpawner::AddWheel(Truck::Wheel & wheel_def)
 {
     unsigned int base_node_index = m_actor->ar_num_nodes;
     node_t *axis_node_1 = GetNodePointer(wheel_def.nodes[0]);
@@ -4571,7 +4402,6 @@ unsigned int ActorSpawner::AddWheel(RigDef::Wheel & wheel_def)
         wheel_def.radius,
         wheel_def.propulsion,
         wheel_def.braking,
-        wheel_def.node_defaults,
         wheel_def.mass,
         -1.f // Set width to axis length (width in definition is ignored)
     );
@@ -4585,7 +4415,6 @@ unsigned int ActorSpawner::AddWheel(RigDef::Wheel & wheel_def)
         wheel_def.damping,     /* Tyre */
         wheel_def.springiness, /* Rim */
         wheel_def.damping,     /* Rim */
-        wheel_def.beam_defaults,
         wheel_def.rigidity_node
     );
 
@@ -4603,7 +4432,7 @@ void ActorSpawner::CreateWheelSkidmarks(unsigned int wheel_index)
         RoR::App::GetGfxScene()->GetSkidmarkConf(), &m_actor->ar_wheels[wheel_index], m_particles_parent_scenenode, 300, 20);
 }
 
-unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
+unsigned int ActorSpawner::AddWheel2(Truck::Wheel2 & wheel_2_def)
 {
     unsigned int base_node_index = m_actor->ar_num_nodes;
     wheel_t & wheel = m_actor->ar_wheels[m_actor->ar_num_wheels];
@@ -4660,11 +4489,11 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
         Ogre::Vector3 ray_point = axis_node_1->RelPosition + rim_ray_vector;
 
         node_t & outer_node    = GetFreeNode();
-        InitNode(outer_node, ray_point, wheel_2_def.node_defaults);
+        InitNode(outer_node, ray_point);
         outer_node.mass        = node_mass;
         outer_node.nd_rim_node = true;
 
-        m_actor->ar_minimass[outer_node.pos] = m_file->global_minimass->min_mass;
+        m_actor->ar_minimass[outer_node.pos] = m_state.default_minimass;
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(outer_node.pos)));
 
@@ -4672,11 +4501,11 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
         ray_point = axis_node_2->RelPosition + rim_ray_vector;
 
         node_t & inner_node    = GetFreeNode();
-        InitNode(inner_node, ray_point, wheel_2_def.node_defaults);
+        InitNode(inner_node, ray_point);
         inner_node.mass        = node_mass;
         inner_node.nd_rim_node = true;
 
-        m_actor->ar_minimass[inner_node.pos] = m_file->global_minimass->min_mass;
+        m_actor->ar_minimass[inner_node.pos] = m_state.default_minimass;
 
         m_gfx_nodes.push_back(NodeGfx(static_cast<uint16_t>(inner_node.pos)));
 
@@ -4701,8 +4530,8 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
         InitNode(outer_node, ray_point);
         outer_node.mass          = (0.67f * wheel_2_def.mass) / (2.f * wheel_2_def.num_rays);
         outer_node.friction_coef = wheel.wh_width * WHEEL_FRICTION_COEF;
-        outer_node.volume_coef   = wheel_2_def.node_defaults->volume;
-        outer_node.surface_coef  = wheel_2_def.node_defaults->surface;
+        outer_node.volume_coef   = m_state.default_node_surface;
+        outer_node.surface_coef  = m_state.default_node_surface;
         outer_node.nd_contacter  = true;
         outer_node.nd_tyre_node  = true;
 
@@ -4715,8 +4544,8 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
         InitNode(inner_node, ray_point);
         inner_node.mass          = (0.33f * wheel_2_def.mass) / (2.f * wheel_2_def.num_rays);
         inner_node.friction_coef = wheel.wh_width * WHEEL_FRICTION_COEF;
-        inner_node.volume_coef   = wheel_2_def.node_defaults->volume;
-        inner_node.surface_coef  = wheel_2_def.node_defaults->surface;
+        inner_node.volume_coef   = m_state.default_node_surface;
+        inner_node.surface_coef  = m_state.default_node_surface;
         inner_node.nd_contacter  = true;
         inner_node.nd_tyre_node  = true;
 
@@ -4809,7 +4638,7 @@ unsigned int ActorSpawner::AddWheel2(RigDef::Wheel2 & wheel_2_def)
     wheel.wh_rim_radius    = wheel_2_def.rim_radius;
     wheel.wh_arm_node      = this->GetNodePointer(wheel_2_def.reference_arm_node);
 
-    if (wheel_2_def.propulsion != RigDef::Wheels::PROPULSION_NONE)
+    if (wheel_2_def.propulsion != Truck::Wheels::PROPULSION_NONE)
     {
         /* for inter-differential locking */
         m_actor->m_proped_wheel_pairs[m_actor->m_num_proped_wheels] = m_actor->ar_num_wheels;
@@ -4879,17 +4708,17 @@ unsigned int ActorSpawner::AddWheelBeam(
     node_t *node_2, 
     float spring, 
     float damping, 
-    std::shared_ptr<RigDef::BeamDefaults> beam_defaults,
     float max_contraction,   /* Default: -1.f */
     float max_extension,     /* Default: -1.f */
     BeamType type            /* Default: BEAM_INVISIBLE */
 )
 {
     unsigned int index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(*node_1, *node_2, beam_defaults, DEFAULT_DETACHER_GROUP); 
+    beam_t & beam = AddBeam(*node_1, *node_2);
     beam.bm_type = type;
     beam.k = spring;
     beam.d = damping;
+    beam.detacher_group = DEFAULT_DETACHER_GROUP;
     if (max_contraction > 0.f)
     {
         beam.shortbound = max_contraction;
@@ -4901,7 +4730,7 @@ unsigned int ActorSpawner::AddWheelBeam(
     return index;
 }
 
-unsigned int ActorSpawner::AddWheelRimBeam(RigDef::Wheel2 & wheel_2_def, node_t *node_1, node_t *node_2)
+unsigned int ActorSpawner::AddWheelRimBeam(Truck::Wheel2 & wheel_2_def, node_t *node_1, node_t *node_2)
 {
     unsigned int beam_index = _SectionWheels2AddBeam(wheel_2_def, node_1, node_2);
     beam_t & beam = GetBeam(beam_index);
@@ -4910,7 +4739,7 @@ unsigned int ActorSpawner::AddWheelRimBeam(RigDef::Wheel2 & wheel_2_def, node_t 
     return beam_index;
 }
 
-unsigned int ActorSpawner::AddTyreBeam(RigDef::Wheel2 & wheel_2_def, node_t *node_1, node_t *node_2)
+unsigned int ActorSpawner::AddTyreBeam(Truck::Wheel2 & wheel_2_def, node_t *node_1, node_t *node_2)
 {
     unsigned int beam_index = _SectionWheels2AddBeam(wheel_2_def, node_1, node_2);
     beam_t & beam = GetBeam(beam_index);
@@ -4922,30 +4751,30 @@ unsigned int ActorSpawner::AddTyreBeam(RigDef::Wheel2 & wheel_2_def, node_t *nod
     return beam_index;
 }
 
-unsigned int ActorSpawner::_SectionWheels2AddBeam(RigDef::Wheel2 & wheel_2_def, node_t *node_1, node_t *node_2)
+unsigned int ActorSpawner::_SectionWheels2AddBeam(Truck::Wheel2 & wheel_2_def, node_t *node_1, node_t *node_2)
 {
     unsigned int index = m_actor->ar_num_beams;
     beam_t & beam = GetFreeBeam();
     InitBeam(beam, node_1, node_2);
     beam.bm_type = BEAM_NORMAL;
-    SetBeamStrength(beam, wheel_2_def.beam_defaults->breaking_threshold);
-    SetBeamDeformationThreshold(beam, wheel_2_def.beam_defaults);
+    SetBeamStrength(beam, m_state.default_break);
+    beam.strength = m_state.default_deform;
     return index;
 }
 
-void ActorSpawner::ProcessWheel2(RigDef::Wheel2 & def)
+void ActorSpawner::ProcessWheel2(Truck::Wheel2 & def)
 {
     unsigned int node_base_index = m_actor->ar_num_nodes;
     unsigned int wheel_index = AddWheel2(def);
     m_wheel_visuals_queue.push_back(WheelVisualsTicket(wheel_index, node_base_index, &def));
 };
 
-void ActorSpawner::ProcessWheel(RigDef::Wheel & def)
+void ActorSpawner::ProcessWheel(Truck::Wheel & def)
 {
     AddWheel(def);
 };
 
-void ActorSpawner::ProcessWheelDetacher(RigDef::WheelDetacher & def)
+void ActorSpawner::ProcessWheelDetacher(Truck::WheelDetacher & def)
 {
     if (def.wheel_id > m_actor->ar_num_wheels - 1)
     {
@@ -4956,7 +4785,7 @@ void ActorSpawner::ProcessWheelDetacher(RigDef::WheelDetacher & def)
     m_actor->ar_wheels[def.wheel_id].wh_detacher_group = def.detacher_group;
 };
 
-void ActorSpawner::ProcessTractionControl(RigDef::TractionControl & def)
+void ActorSpawner::ProcessTractionControl(Truck::TractionControl & def)
 {
     /* #1: regulating_force */
     float force = def.regulation_force;
@@ -4989,7 +4818,7 @@ void ActorSpawner::ProcessTractionControl(RigDef::TractionControl & def)
     m_actor->tc_notoggle = def.attr_no_toggle;
 };
 
-void ActorSpawner::ProcessAntiLockBrakes(RigDef::AntiLockBrakes & def)
+void ActorSpawner::ProcessAntiLockBrakes(Truck::AntiLockBrakes & def)
 {
     /* #1: regulating_force */
     float force = def.regulation_force;
@@ -5021,7 +4850,7 @@ void ActorSpawner::ProcessAntiLockBrakes(RigDef::AntiLockBrakes & def)
     m_actor->alb_notoggle = def.attr_no_toggle;
 }
 
-void ActorSpawner::ProcessBrakes(RigDef::Brakes & def)
+void ActorSpawner::ProcessBrakes(Truck::Brakes & def)
 {
     m_actor->ar_brake_force = def.default_braking_force;
     m_actor->m_handbrake_force = 2.f * m_actor->ar_brake_force;
@@ -5031,7 +4860,7 @@ void ActorSpawner::ProcessBrakes(RigDef::Brakes & def)
     }
 };
 
-void ActorSpawner::ProcessEngturbo(RigDef::Engturbo & def)
+void ActorSpawner::ProcessEngturbo(Truck::Engturbo& def)
 {
     /* Is this a land vehicle? */
     if (m_actor->ar_engine == nullptr)
@@ -5039,23 +4868,11 @@ void ActorSpawner::ProcessEngturbo(RigDef::Engturbo & def)
         AddMessage(Message::TYPE_WARNING, "Section 'engturbo' found but no engine defined. Skipping ...");
         return;
     }
-    
-        /* Find it */
-    std::shared_ptr<RigDef::Engturbo> engturbo;
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin();
-    for (; module_itor != m_selected_modules.end(); module_itor++)
-    {
-        if (module_itor->get()->engturbo != nullptr)
-        {
-            engturbo = module_itor->get()->engturbo;
-        }
-    }
-    
-        /* Process it */
-    m_actor->ar_engine->SetTurboOptions(engturbo->version, engturbo->tinertiaFactor, engturbo->nturbos, engturbo->param1, engturbo->param2, engturbo->param3, engturbo->param4, engturbo->param5, engturbo->param6, engturbo->param7, engturbo->param8, engturbo->param9, engturbo->param10, engturbo->param11);
+
+    m_actor->ar_engine->SetTurboOptions(def.version, def.tinertiaFactor, def.nturbos, def.param1, def.param2, def.param3, def.param4, def.param5, def.param6, def.param7, def.param8, def.param9, def.param10, def.param11);
 };
 
-void ActorSpawner::ProcessEngoption(RigDef::Engoption & def)
+void ActorSpawner::ProcessEngoption(Truck::Engoption& def)
 {
     /* Is this a land vehicle? */
     if (m_actor->ar_engine == nullptr)
@@ -5064,39 +4881,28 @@ void ActorSpawner::ProcessEngoption(RigDef::Engoption & def)
         return;
     }
 
-    /* Find it */
-    std::shared_ptr<RigDef::Engoption> engoption;
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin();
-    for (; module_itor != m_selected_modules.end(); module_itor++)
-    {
-        if (module_itor->get()->engoption != nullptr)
-        {
-            engoption = module_itor->get()->engoption;
-        }
-    }
-
-    if (engoption->idle_rpm > 0 && engoption->stall_rpm > 0 && engoption->stall_rpm > engoption->idle_rpm)
+    if (def.idle_rpm > 0 && def.stall_rpm > 0 && def.stall_rpm > def.idle_rpm)
     {
         AddMessage(Message::TYPE_WARNING, "Stall RPM is set higher than Idle RPM.");
     }
 
     /* Process it */
     m_actor->ar_engine->SetEngineOptions(
-        engoption->inertia,
-        engoption->type,
-        engoption->clutch_force,
-        engoption->shift_time,
-        engoption->clutch_time,
-        engoption->post_shift_time,
-        engoption->idle_rpm,
-        engoption->stall_rpm,
-        engoption->max_idle_mixture,
-        engoption->min_idle_mixture,
-        engoption->braking_torque
+        def.inertia,
+        def.type,
+        def.clutch_force,
+        def.shift_time,
+        def.clutch_time,
+        def.post_shift_time,
+        def.idle_rpm,
+        def.stall_rpm,
+        def.max_idle_mixture,
+        def.min_idle_mixture,
+        def.braking_torque
     );
 };
 
-void ActorSpawner::ProcessEngine(RigDef::Engine & def)
+void ActorSpawner::ProcessEngine(Truck::Engine & def)
 {
     /* Process it */
     m_actor->ar_driveable = TRUCK;
@@ -5125,54 +4931,22 @@ void ActorSpawner::ProcessEngine(RigDef::Engine & def)
     m_actor->ar_engine->SetAutoMode(App::sim_gearbox_mode->GetEnum<SimGearboxMode>());
 };
 
-void ActorSpawner::ProcessHelp()
+void ActorSpawner::ProcessAuthor(int pos)
 {
-    SetCurrentKeyword(RigDef::File::KEYWORD_HELP);
-    unsigned int material_count = 0;
 
-    std::list<std::shared_ptr<RigDef::File::Module>>::iterator module_itor = m_selected_modules.begin();
-    for (; module_itor != m_selected_modules.end(); module_itor++)
+    authorinfo_t author;
+    author.type = m_cur_module->authors[pos].type;
+    author.name = m_cur_module->authors[pos].name;
+    author.email = m_cur_module->authors[pos].email;
+    if (m_cur_module->authors[pos]._has_forum_account)
     {
-        auto module = module_itor->get();
-        if (! module->help_panel_material_name.empty())
-        {
-            m_help_material_name = module->help_panel_material_name;
-            material_count++;
-        }
+        author.id = m_cur_module->authors[pos].forum_account_id;
     }
+    m_actor->authors.push_back(author);
 
-    if (material_count > 1)
-    {
-        std::stringstream msg;
-        msg << "Multiple (" << material_count << ") 'help' sections found. Using the last one...";
-        AddMessage(Message::TYPE_WARNING, msg.str());	
-    }
-
-    SetCurrentKeyword(RigDef::File::KEYWORD_INVALID);
 };
 
-void ActorSpawner::ProcessAuthors()
-{
-    SetCurrentKeyword(RigDef::File::KEYWORD_FILEFORMATVERSION);
-
-    std::vector<RigDef::Author>::iterator author_itor = m_file->authors.begin();
-    for (; author_itor != m_file->authors.end(); author_itor++)
-    {
-        authorinfo_t author;
-        author.type = author_itor->type;
-        author.name = author_itor->name;
-        author.email = author_itor->email;
-        if (author_itor->_has_forum_account)
-        {
-            author.id = author_itor->forum_account_id;
-        }
-        m_actor->authors.push_back(author);
-    }	
-
-    SetCurrentKeyword(RigDef::File::KEYWORD_INVALID);
-};
-
-unsigned int ActorSpawner::GetNodeIndexOrThrow(RigDef::Node::Ref const & node_ref)
+NodeIdx_t ActorSpawner::GetNodeIndexOrThrow(Truck::Node::Ref const & node_ref)
 {
     std::pair<unsigned int, bool> result = GetNodeIndex(node_ref);
     if (! result.second)
@@ -5184,51 +4958,32 @@ unsigned int ActorSpawner::GetNodeIndexOrThrow(RigDef::Node::Ref const & node_re
     return result.first;
 }
 
-node_t & ActorSpawner::GetNodeOrThrow(RigDef::Node::Ref const & node_ref)
+node_t & ActorSpawner::GetNodeOrThrow(Truck::Node::Ref const & node_ref)
 {
     return m_actor->ar_nodes[GetNodeIndexOrThrow(node_ref)];
 }
 
-void ActorSpawner::ProcessCamera(RigDef::Camera & def)
+void ActorSpawner::ProcessCamera(Truck::Camera & def)
 {
-    /* Center node */
     if (def.center_node.IsValidAnyState())
     {
-        m_actor->ar_camera_node_pos[m_actor->ar_num_cameras] 
-            = static_cast<int>(GetNodeIndexOrThrow(def.center_node));
-    }
-    else
-    {
-        m_actor->ar_camera_node_pos[m_actor->ar_num_cameras] = -1;
+        m_actor->ar_camera_node_pos[m_actor->ar_num_cameras] = GetNodeIndexOrThrow(def.center_node);
     }
 
-    /* Direction node */
     if (def.back_node.IsValidAnyState())
     {
-        m_actor->ar_camera_node_dir[m_actor->ar_num_cameras] 
-            = static_cast<int>(GetNodeIndexOrThrow(def.back_node));
-    }
-    else
-    {
-        m_actor->ar_camera_node_dir[m_actor->ar_num_cameras] = -1;
+        m_actor->ar_camera_node_dir[m_actor->ar_num_cameras] = GetNodeIndexOrThrow(def.back_node);
     }
 
-    /* Roll node */
     if (def.left_node.IsValidAnyState())
     {
-        m_actor->ar_camera_node_roll[m_actor->ar_num_cameras] 
-            = static_cast<int>(GetNodeIndexOrThrow(def.left_node));
-    }
-    else
-    {
-        m_actor->ar_camera_node_roll[m_actor->ar_num_cameras] = -1;
+        m_actor->ar_camera_node_roll[m_actor->ar_num_cameras] = GetNodeIndexOrThrow(def.left_node);
     }
 
-    /* Advance */
     m_actor->ar_num_cameras++;
 };
 
-node_t* ActorSpawner::GetBeamNodePointer(RigDef::Node::Ref const & node_ref)
+node_t* ActorSpawner::GetBeamNodePointer(Truck::Node::Ref const & node_ref)
 {
     node_t* node = GetNodePointer(node_ref);
     if (node != nullptr)
@@ -5238,183 +4993,27 @@ node_t* ActorSpawner::GetBeamNodePointer(RigDef::Node::Ref const & node_ref)
     return nullptr;
 }
 
-void ActorSpawner::ProcessBeam(RigDef::Beam & def)
+void ActorSpawner::ProcessBeam(Truck::Beam & def)
 {
-    // Nodes
-    node_t* ar_nodes[] = {nullptr, nullptr};
-    ar_nodes[0] = GetBeamNodePointer(def.nodes[0]);
-    if (ar_nodes[0] == nullptr)
-    {
-        AddMessage(Message::TYPE_WARNING, std::string("Ignoring beam, could not find node: ") + def.nodes[0].ToString());
-        return;
-    }
-    ar_nodes[1] = GetBeamNodePointer(def.nodes[1]);
-    if (ar_nodes[1] == nullptr)
-    {
-        AddMessage(Message::TYPE_WARNING, std::string("Ignoring beam, could not find node: ") + def.nodes[1].ToString());
-        return;
-    }
 
-    // Beam
+    // Set up beam
     int beam_index = m_actor->ar_num_beams;
-    beam_t & beam = AddBeam(*ar_nodes[0], *ar_nodes[1], def.defaults, def.detacher_group);
-    beam.bm_type = BEAM_NORMAL;
-    beam.k = def.defaults->GetScaledSpringiness();
-    beam.d = def.defaults->GetScaledDamping();
-    beam.bounded = NOSHOCK; // Orig: if (shortbound) ... hardcoded in BTS_BEAMS
-
-    /* Calculate length */
-    // orig = precompression hardcoded to 1
+    beam_t & beam = AddBeam(def.nodes[0], def.nodes[1]);
+    beam.strength          = m_state.default_break * m_state.default_break_scale;
+    beam.bm_type           = BEAM_NORMAL;
+    beam.d                 = m_state.default_damp * m_state.default_damp_scale;
+    beam.k                 = m_state.default_spring * m_state.default_spring_scale;
+    beam.bounded           = def.bounded;
     CalculateBeamLength(beam);
 
-    /* Strength */
-    float beam_strength = def.defaults->GetScaledBreakingThreshold();
-    beam.strength  = beam_strength;
-
-    /* Options */
-    if (BITMASK_IS_1(def.options, RigDef::Beam::OPTION_r_ROPE))
+    if (!def.invisible)
     {
-        beam.bounded = ROPE;
-    }
-    if (BITMASK_IS_1(def.options, RigDef::Beam::OPTION_s_SUPPORT))
-    {
-        beam.bounded = SUPPORTBEAM;
-        beam.longbound = def.extension_break_limit;
-    }
-
-    if (BITMASK_IS_0(def.options, RigDef::Beam::OPTION_i_INVISIBLE))
-    {
-        this->CreateBeamVisuals(beam, beam_index, true, def.defaults);
+        this->CreateBeamVisuals(beam, beam_index, /*visible=*/true);
     }
 }
 
-void ActorSpawner::SetBeamDeformationThreshold(beam_t & beam, std::shared_ptr<RigDef::BeamDefaults> beam_defaults)
-{
-    /*
-    ---------------------------------------------------------------------------
-        Old parser logic
-    ---------------------------------------------------------------------------
 
-    VAR default_deform              = BEAM_DEFORM (400,000)
-    VAR default_deform_scale        = 1
-    VAR beam_creak                  = BEAM_CREAK_DEFAULT (100,000)
-    VAR enable_advanced_deformation = false
-
-
-    add_beam()
-        IF default_deform < beam_creak
-            default_deform = beam_creak
-        END IF
-
-        VAR beam;
-        beam.default_deform = default_deform * default_deform_scale
-    END
-
-    
-    enable_advanced_deformation:
-        READ enable_advanced_deformation
-
-
-    set_beam_defaults:
-        READ default_deform
-        VAR  default_deform_user_defined
-        READ default_deform_scale
-        VAR  plastic_coef_user_defined
-
-        IF (!enable_advanced_deformation && default_deform < BEAM_DEFORM)
-           default_deform = BEAM_DEFORM;
-        END IF
-
-        IF (plastic_coef_user_defined)
-            beam_creak = 0
-        END IF
-  
-    ---------------------------------------------------------------------------
-        TruckParser2013
-    ---------------------------------------------------------------------------    
-
-    VAR beam_defaults
-    {
-        default_deform                = BEAM_DEFORM
-        scale.default_deform          = 1
-        _enable_advanced_deformation  = false
-        _user_defined                 = false
-        _default_deform_set           = false
-        _plastic_coef_user_defined    = false
-    }
-
-
-    set_beam_defaults:
-        READ beam_defaults
-
-
-    add_beam:
-
-        // Init
-
-        VAR default_deform = BEAM_DEFORM;
-        VAR beam_creak = BEAM_CREAK_DEFAULT;
-
-        // Old 'set_beam_defaults'
-
-        IF (beam_defaults._is_user_defined)
-
-            default_deform = beam_defaults.default_deform
-            IF (!beam_defaults._enable_advanced_deformation && default_deform < BEAM_DEFORM)
-               default_deform = BEAM_DEFORM;
-            END IF
-
-            IF (beam_defaults._plastic_coef_user_defined && beam_defaults.plastic_coef >= 0)
-                beam_creak = 0
-            END IF
-
-        END IF
-
-        // Old 'add_beam'
-
-        IF default_deform < beam_creak
-            default_deform = beam_creak
-        END IF
-
-        VAR beam;
-        beam.default_deform = default_deform * beam_defaults.scale.default_deform
-    
-    ---------------------------------------------------------------------------
-    */
-
-    // Old init
-    float default_deform = BEAM_DEFORM; 
-    float beam_creak = BEAM_CREAK_DEFAULT;
-
-    // Old 'set_beam_defaults'
-    if (beam_defaults->_is_user_defined)
-    {
-        default_deform = beam_defaults->deformation_threshold;
-        if (!beam_defaults->_enable_advanced_deformation && default_deform < BEAM_DEFORM)
-        {
-            default_deform = BEAM_DEFORM;
-        }
-
-        if (beam_defaults->_is_plastic_deform_coef_user_defined && beam_defaults->plastic_deform_coef >= 0.f)
-        {
-            beam_creak = 0.f;
-        }
-    }
-
-    // Old 'add_beam'
-    if (default_deform < beam_creak)
-    {
-        default_deform = beam_creak;
-    }
-
-    float deformation_threshold = default_deform * beam_defaults->scale.deformation_threshold_constant;
-
-    beam.minmaxposnegstress = deformation_threshold;
-    beam.maxposstress       = deformation_threshold;
-    beam.maxnegstress       = -(deformation_threshold);
-}
-
-void ActorSpawner::CreateBeamVisuals(beam_t const & beam, int beam_index, bool visible, std::shared_ptr<RigDef::BeamDefaults> const& beam_defaults, std::string material_override)
+void ActorSpawner::CreateBeamVisuals(beam_t const & beam, int beam_index, bool visible, std::string material_override)
 {
     std::string material_name = material_override;
     if (material_name.empty())
@@ -5425,7 +5024,7 @@ void ActorSpawner::CreateBeamVisuals(beam_t const & beam, int beam_index, bool v
         }
         else
         {
-            material_name = beam_defaults->beam_material_name;
+            material_name = m_state.default_beam_material;
             // Check for existing substitute
             auto it = m_managed_materials.find(material_name);
             if (it != m_managed_materials.end())
@@ -5439,7 +5038,125 @@ void ActorSpawner::CreateBeamVisuals(beam_t const & beam, int beam_index, bool v
         }
     }
 
-    m_beam_visuals_queue.emplace_back(beam_index, beam_defaults->visual_beam_diameter, material_name.c_str(), visible);
+    m_beam_visuals_queue.emplace_back(beam_index, m_state.default_beam_diameter, material_name.c_str(), visible);
+}
+
+void ActorSpawner::ProcessSubmesh()
+{
+    //close the current mesh
+    m_state.subtexcoords.push_back((int)m_state.texcoords.size());
+    m_state.subcabs.push_back(m_actor->ar_num_cabs);
+    m_state.free_sub++;
+
+    //initialize the next
+    m_state.subisback.push_back(BACKMESH_NONE);
+}
+
+void ActorSpawner::ProcessCab(Truck::Cab & def)
+{
+    if (m_actor->ar_num_cabs >= MAX_CABS)
+    {
+        this->AddMessage(Message::TYPE_WARNING, "cabs limit reached ("+TOSTRING(MAX_CABS)+")");
+        return;
+    }
+    m_actor->ar_cabs[m_actor->ar_num_cabs*3]  =this->ResolveNodeRef(def.nodes[0]);
+    m_actor->ar_cabs[m_actor->ar_num_cabs*3+1]=this->ResolveNodeRef(def.nodes[1]);
+    m_actor->ar_cabs[m_actor->ar_num_cabs*3+2]=this->ResolveNodeRef(def.nodes[2]);
+
+    if (m_actor->ar_num_collcabs >= MAX_CABS)
+    {
+        this->AddMessage(Message::TYPE_WARNING, "unable to create collcab; cabs limit reached ("+TOSTRING(MAX_CABS)+")");
+        return;
+    }
+
+    if (def.type=='c' || def.type=='p' || def.type=='u')
+    {
+        // `collcabtype` was removed, these types are equivalent now.
+        m_actor->ar_collcabs[m_actor->ar_num_collcabs]=m_actor->ar_num_cabs; m_actor->ar_num_collcabs++;
+    }
+
+    bool buoy_add = false;
+    Buoyance::BuoyType buoy_type = Buoyance::BUOY_NORMAL;
+    if (def.type=='b') {buoy_add=true; buoy_type=Buoyance::BUOY_NORMAL;   };
+    if (def.type=='r') {buoy_add=true; buoy_type=Buoyance::BUOY_DRAGONLY; };
+    if (def.type=='s') {buoy_add=true; buoy_type=Buoyance::BUOY_DRAGLESS; };
+    if (def.type=='D' || def.type == 'F' || def.type == 'S')
+    {
+        m_actor->ar_collcabs[m_actor->ar_num_collcabs]=m_actor->ar_num_cabs;
+        m_actor->ar_num_collcabs++;
+        buoy_add = true;
+        buoy_type=Buoyance::BUOY_NORMAL;
+    }
+
+    if (buoy_add)
+    {
+        if (m_actor->ar_num_collcabs >= MAX_CABS || m_actor->ar_num_buoycabs >= MAX_CABS)
+        {
+            this->AddMessage(Message::TYPE_WARNING, "unable to create buoycab; cabs limit reached ("+TOSTRING(MAX_CABS)+")");
+            return;
+        }
+        m_actor->ar_buoycabs[m_actor->ar_num_buoycabs]=m_actor->ar_num_cabs;
+        m_actor->ar_num_buoycabs++;
+    }
+
+    m_actor->ar_num_cabs++;
+}
+
+void ActorSpawner::ProcessBackmesh()
+{
+    //close the current mesh
+    m_state.subtexcoords.push_back((int)m_state.texcoords.size());
+    m_state.subcabs.push_back(m_actor->ar_num_cabs);
+
+    //make it normal
+    m_state.subisback.push_back(BACKMESH_NONE);
+    m_state.free_sub++;
+
+
+    //add an extra front mesh
+    int start;
+    //texcoords
+    if (m_state.free_sub==1) start=0; else start=m_state.subtexcoords[m_state.free_sub-2];
+    for (int i=start; i<m_state.subtexcoords[m_state.free_sub-1]; i++)
+    {
+        m_state.texcoords.push_back(m_state.texcoords[i]);
+    }
+    //cab
+    if (m_state.free_sub==1) start=0; else start=m_state.subcabs[m_state.free_sub-2];
+    for (int i=start; i<m_state.subcabs[m_state.free_sub-1]; i++)
+    {
+        m_actor->ar_cabs[m_actor->ar_num_cabs] = m_actor->ar_cabs[i*3];
+        m_actor->ar_cabs[m_actor->ar_num_cabs] = m_actor->ar_cabs[i*3+1];
+        m_actor->ar_cabs[m_actor->ar_num_cabs] = m_actor->ar_cabs[i*3+2];
+        m_actor->ar_num_cabs++;
+    }
+    //finish it, this is a window
+    m_state.subisback.push_back(BACKMESH_TRANSPARENT);
+    //close the current mesh
+    m_state.subtexcoords.push_back((int)m_state.texcoords.size());
+    m_state.subcabs.push_back(m_actor->ar_num_cabs);
+    //make is transparent
+    m_state.free_sub++;
+
+
+    //add an extra back mesh
+    //texcoords
+    if (m_state.free_sub==1) start=0; else start=m_state.subtexcoords[m_state.free_sub-2];
+    for (int i=start; i<m_state.subtexcoords[m_state.free_sub-1]; i++)
+    {
+        m_state.texcoords.push_back(m_state.texcoords[i]);
+    }
+    //cab
+    if (m_state.free_sub==1) start=0; else start=m_state.subcabs[m_state.free_sub-2];
+    for (int i=start; i<m_state.subcabs[m_state.free_sub-1]; i++)
+    {
+        m_actor->ar_cabs[m_actor->ar_num_cabs] = m_actor->ar_cabs[i*3];
+        m_actor->ar_cabs[m_actor->ar_num_cabs] = m_actor->ar_cabs[i*3+1];
+        m_actor->ar_cabs[m_actor->ar_num_cabs] = m_actor->ar_cabs[i*3+2];
+        m_actor->ar_num_cabs++;
+    }
+    //we don't finish, there will be a submesh statement later
+    m_state.subisback.push_back(BACKMESH_OPAQUE);
 }
 
 void ActorSpawner::CalculateBeamLength(beam_t & beam)
@@ -5453,8 +5170,6 @@ void ActorSpawner::InitBeam(beam_t & beam, node_t *node_1, node_t *node_2)
 {
     beam.p1 = node_1;
     beam.p2 = node_2;
-
-    /* Length */
     CalculateBeamLength(beam);
 }
 
@@ -5462,9 +5177,9 @@ void ActorSpawner::AddMessage(ActorSpawner::Message::Type type,	Ogre::String con
 {
     Str<4000> txt;
     txt << m_file->name;
-    if (m_current_keyword != RigDef::File::KEYWORD_INVALID)
+    if (m_current_keyword != Truck::KEYWORD_NONE)
     {
-        txt << " (" << RigDef::File::KeywordToString(m_current_keyword) << ")";
+        txt << " (" << Truck::Document::KeywordToString(m_current_keyword) << ")";
     }
     txt << ": " << text;
     RoR::Console::MessageType cm_type;
@@ -5487,142 +5202,66 @@ void ActorSpawner::AddMessage(ActorSpawner::Message::Type type,	Ogre::String con
     RoR::App::GetConsole()->putMessage(RoR::Console::CONSOLE_MSGTYPE_ACTOR, cm_type, txt.ToCStr());
 }
 
-std::pair<unsigned int, bool> ActorSpawner::GetNodeIndex(RigDef::Node::Ref const & node_ref, bool quiet /* Default: false */)
+NodeIdx_t ActorSpawner::ResolveNodeRef(Truck::Node::Ref const & node_ref)
 {
-    if (!node_ref.IsValidAnyState())
+    // Equivalent of `SerializedRig::parse_node_number()`, see https://github.com/only-a-ptr/ror-legacy-svn-trunk
+
+    // Query named nodes if possible
+    if (!m_node_names.empty() && node_ref.name != "")
     {
-        if (! quiet)
+        auto itor = m_node_names.find(node_ref.name);
+        if (itor != m_node_names.end())
         {
-            AddMessage(Message::TYPE_ERROR, std::string("Attempt to resolve invalid node reference: ") + node_ref.ToString());
+            return itor->second;
         }
-        return std::make_pair(0, false);
     }
-    bool is_imported = node_ref.GetImportState_IsValid();
-    bool is_named = (is_imported ? node_ref.GetImportState_IsResolvedNamed() : node_ref.GetRegularState_IsNamed());
-    if (is_named)
+
+    // Query numbered nodes
+    if (node_ref.number >= m_actor->ar_num_nodes)
     {
-        auto result = m_named_nodes.find(node_ref.Str());
-        if (result != m_named_nodes.end())
-        {
-            return std::make_pair(result->second, true);
-        }
-        else if (! quiet)
-        {
-            std::stringstream msg;
-            msg << "Failed to resolve node-ref (node not found):" << node_ref.ToString();
-            AddMessage(Message::TYPE_ERROR, msg.str());
-        }
-        return std::make_pair(0, false);
+        this->AddMessage(Message::TYPE_ERROR,
+            fmt::format("Fatal: requested non-existent node number {} (highest existing is {})",
+                node_ref.number, m_actor->ar_num_nodes - 1));
+        throw Exception("");
     }
-    else
-    {
-        // Imported nodes pass without check
-        if (!is_imported && (node_ref.Num() >= static_cast<unsigned int>(m_actor->ar_num_nodes)))
-        {
-            if (! quiet)
-            {
-                std::stringstream msg;
-                msg << "Failed to resolve node-ref (node index too big, node count is: "<<m_actor->ar_num_nodes<<"): " << node_ref.ToString();
-                AddMessage(Message::TYPE_ERROR, msg.str());
-            }
-            return std::make_pair(0, false);
-        }
-        return std::make_pair(node_ref.Num(), true);
-    }
+
+    return node_ref.number;
 }
 
-node_t* ActorSpawner::GetNodePointer(RigDef::Node::Ref const & node_ref)
+std::pair<NodeIdx_t, bool> ActorSpawner::GetNodeIndex(Truck::Node::Ref const & node_ref, bool quiet /* = false */)
 {
-    std::pair<unsigned int, bool> result = GetNodeIndex(node_ref);
-    if (result.second)
-    {
-        return & m_actor->ar_nodes[result.first];
-    }
-    else
-    {
-        return nullptr;
-    }
+    return std::make_pair(this->ResolveNodeRef(node_ref), true);
 }
 
-node_t* ActorSpawner::GetNodePointerOrThrow(RigDef::Node::Ref const & node_ref)
+node_t* ActorSpawner::GetNodePointer(Truck::Node::Ref const & node_ref)
 {
-    node_t *node = GetNodePointer(node_ref);
-    if (node == nullptr)
-    {
-        std::stringstream msg;
-        msg << "Required node not found: " << node_ref.ToString();
-        throw Exception(msg.str());
-    }
-    return node;
+    return &m_actor->ar_nodes[this->ResolveNodeRef(node_ref)];
 }
 
-std::pair<unsigned int, bool> ActorSpawner::AddNode(RigDef::Node::Id & id)
+node_t* ActorSpawner::GetNodePointerOrThrow(Truck::Node::Ref const & node_ref)
 {
-    if (!id.IsValid())
-    {
-        std::stringstream msg;
-        msg << "Attempt to add node with 'INVALID' flag: " << id.ToString() << " (number of nodes at this point: " << m_actor->ar_num_nodes << ")";
-        this->AddMessage(Message::TYPE_ERROR, msg.str());
-        return std::make_pair(0, false);
-    }
-
-    if (id.IsTypeNamed())
-    {
-        unsigned int new_index = static_cast<unsigned int>(m_actor->ar_num_nodes);
-        auto insert_result = m_named_nodes.insert(std::make_pair(id.Str(), new_index));
-        if (! insert_result.second)
-        {
-            std::stringstream msg;
-            msg << "Ignoring named node! Duplicate name: " << id.Str() << " (number of nodes at this point: " << m_actor->ar_num_nodes << ")";
-            this->AddMessage(Message::TYPE_ERROR, msg.str());
-            return std::make_pair(0, false);
-        }
-        m_actor->ar_num_nodes++;
-        return std::make_pair(new_index, true);
-    }
-    if (id.IsTypeNumbered())
-    {
-        if (id.Num() < static_cast<unsigned int>(m_actor->ar_num_nodes))
-        {
-            std::stringstream msg;
-            msg << "Duplicate node number, previous definition will be overriden! - " << id.ToString() << " (number of nodes at this point: " << m_actor->ar_num_nodes << ")";
-            this->AddMessage(Message::TYPE_WARNING, msg.str());
-        }
-        unsigned int new_index = static_cast<unsigned int>(m_actor->ar_num_nodes);
-        m_actor->ar_num_nodes++;
-        return std::make_pair(new_index, true);
-    }
-    // Invalid node ID without type flag!
-    throw Exception("Invalid Node::Id without type flags!");
+    return GetNodePointer(node_ref);
 }
 
-void ActorSpawner::ProcessNode(RigDef::Node & def)
+void ActorSpawner::ProcessNode(Truck::Node & def)
 {
-    std::pair<unsigned int, bool> inserted_node = AddNode(def.id);
-    if (! inserted_node.second)
-    {
-        return;
-    }
 
-    node_t & node = m_actor->ar_nodes[inserted_node.first];
-    node.pos = inserted_node.first; /* Node index */
+    // Set up node
+    node_t& node = this->GetFreeNode();
+    InitNode(node, m_spawn_position + def.position);
+    node.nd_lockgroup = m_state.lockgroup_default;
 
-    /* Positioning */
-    Ogre::Vector3 node_position = m_spawn_position + def.position;
-    node.AbsPosition = node_position; 
-    node.RelPosition = node_position - m_actor->ar_origin;
+    // Fill debug info
+    m_actor->ar_nodes_name[node.pos] = def.name;
+    m_actor->ar_nodes_id[node.pos] = def.number;
+    m_actor->ar_nodes_name_top_length = std::max(m_actor->ar_nodes_name_top_length, (int)def.name.length());
 
-    node.friction_coef = def.node_defaults->friction;
-    node.volume_coef = def.node_defaults->volume;
-    node.surface_coef = def.node_defaults->surface;
-
-    /* Mass */
-    m_actor->ar_minimass[inserted_node.first] = def.node_minimass->min_mass;
-
-    if (def.node_defaults->load_weight >= 0.f) // The >= operator is in orig.
+    // Configure mass
+    m_actor->ar_minimass[node.pos] = m_state.default_minimass;
+    if (m_state.default_node_loadweight >= 0.f) // The >= operator is intentional.
     {
         // orig = further override of hardcoded default.
-        node.mass = def.node_defaults->load_weight; 
+        node.mass = m_state.default_node_loadweight;
         node.nd_override_mass = true;
         node.nd_loaded_mass = true;
     }
@@ -5632,15 +5271,12 @@ void ActorSpawner::ProcessNode(RigDef::Node & def)
         node.nd_loaded_mass = false;
     }
 
-    /* Lockgroup */
-    node.nd_lockgroup = (m_file->lockgroup_default_nolock) ? RigDef::Lockgroup::LOCKGROUP_NOLOCK : RigDef::Lockgroup::LOCKGROUP_DEFAULT;
-
     /* Options */
-    unsigned int options = def.options | def.node_defaults->options; /* Merge bit flags */
-    if (BITMASK_IS_1(options, RigDef::Node::OPTION_l_LOAD_WEIGHT))
+    std::string options = def.options + m_state.default_node_options;
+    if (options.find(Truck::Node::OPTION_l_LOAD_WEIGHT) != std::string::npos)
     {
         node.nd_loaded_mass = true;
-        if (def._has_load_weight_override)
+        if (def._num_args > 5) // Was override specified? 
         {
             node.nd_override_mass = true;
             node.mass = def.load_weight_override;
@@ -5650,25 +5286,37 @@ void ActorSpawner::ProcessNode(RigDef::Node & def)
             m_actor->m_masscount++;
         }
     }
-    if (BITMASK_IS_1(options, RigDef::Node::OPTION_h_HOOK_POINT))
+
+    if (options.find(Truck::Node::OPTION_b_EXTRA_BUOYANCY) != std::string::npos)
     {
-        /* Link [current-node] -> [node-0] */
-        /* If current node is 0, link [node-0] -> [node-1] */
+        node.buoyancy = 10000.0f;
+    }
+
+    if (options.find(Truck::Node::OPTION_h_HOOK_POINT) != std::string::npos)
+    {
+
+        // Link [current-node] -> [node-0]
+        // If current node is 0, link [node-0] -> [node-1]
         node_t & node_2 = (node.pos == 0) ? GetNode(1) : GetNode(0);
         unsigned int beam_index = m_actor->ar_num_beams;
 
-        beam_t & beam = AddBeam(node, node_2, def.beam_defaults, def.detacher_group);
-        SetBeamStrength(beam, def.beam_defaults->GetScaledBreakingThreshold() * 100.f);
+        // Set up beam
+        beam_t & beam = AddBeam(node, node_2);
+        beam.strength          = m_state.default_break * m_state.default_break_scale * 100.f;
         beam.bm_type           = BEAM_HYDRO;
-        beam.d                 = def.beam_defaults->GetScaledDamping() * 0.1f;
-        beam.k                 = def.beam_defaults->GetScaledSpringiness();
+        beam.d                 = m_state.default_damp * m_state.default_damp_scale * 0.1f;
+        beam.k                 = m_state.default_spring * m_state.default_spring_scale;
         beam.bounded           = ROPE;
         beam.bm_disabled       = true;
         beam.L                 = HOOK_RANGE_DEFAULT;
         beam.refL              = HOOK_RANGE_DEFAULT;
-        SetBeamDeformationThreshold(beam, def.beam_defaults);
-        CreateBeamVisuals(beam, beam_index, false, def.beam_defaults);
-            
+        beam.default_beam_deform = m_state.default_deform * m_state.default_deform_scale;
+        beam.minmaxposnegstress  = m_state.default_deform * m_state.default_deform_scale;
+        beam.maxposstress        = m_state.default_deform * m_state.default_deform_scale;
+        beam.maxnegstress        = m_state.default_deform * m_state.default_deform_scale;
+        
+        CreateBeamVisuals(beam, beam_index, false);
+
         // Logic cloned from SerializedRig.cpp, section BTS_NODES
         hook_t hook;
         hook.hk_hook_node         = & node;
@@ -5689,12 +5337,21 @@ void ActorSpawner::ProcessNode(RigDef::Node & def)
         hook.hk_min_length        = 0.f;
         m_actor->ar_hooks.push_back(hook);
     }
-    AdjustNodeBuoyancy(node, def, def.node_defaults);
-    node.nd_no_ground_contact = BITMASK_IS_1(options, RigDef::Node::OPTION_c_NO_GROUND_CONTACT);
-    node.nd_no_mouse_grab  = BITMASK_IS_1(options, RigDef::Node::OPTION_m_NO_MOUSE_GRAB);
+    node.nd_no_ground_contact = options.find(Truck::Node::OPTION_c_NO_GROUND_CONTACT) != std::string::npos;
 
-    m_actor->ar_exhaust_dir_node        = BITMASK_IS_1(options, RigDef::Node::OPTION_y_EXHAUST_DIRECTION) ? node.pos : 0;
-    m_actor->ar_exhaust_pos_node         = BITMASK_IS_1(options, RigDef::Node::OPTION_x_EXHAUST_POINT) ? node.pos : 0;
+    // Order matters for flags 'm' and 'n'
+    for (char c: options)
+    {
+        switch (c)
+        {
+        case Truck::Node::OPTION_m_NO_MOUSE_GRAB: node.nd_no_mouse_grab = true; break;
+        case Truck::Node::OPTION_n_MOUSE_GRAB:    node.nd_no_mouse_grab = false; break;
+        default:;
+        }
+    }
+
+    m_actor->ar_exhaust_dir_node = options.find(Truck::Node::OPTION_y_EXHAUST_DIRECTION) != std::string::npos;
+    m_actor->ar_exhaust_pos_node = options.find(Truck::Node::OPTION_x_EXHAUST_POINT) != std::string::npos;
 
     // Update "fusedrag" autocalc y & z span
     if (def.position.z < m_fuse_z_min) { m_fuse_z_min = def.position.z; }
@@ -5704,10 +5361,10 @@ void ActorSpawner::ProcessNode(RigDef::Node & def)
 
     // GFX
     NodeGfx nfx(static_cast<uint16_t>(node.pos));
-    nfx.nx_no_particles = BITMASK_IS_1(options, RigDef::Node::OPTION_p_NO_PARTICLES);
-    nfx.nx_may_get_wet  = BITMASK_IS_0(options, RigDef::Node::OPTION_c_NO_GROUND_CONTACT);
-    nfx.nx_no_particles = BITMASK_IS_1(options, RigDef::Node::OPTION_p_NO_PARTICLES);
-    nfx.nx_no_sparks    = BITMASK_IS_1(options, RigDef::Node::OPTION_f_NO_SPARKS);
+    nfx.nx_may_get_wet  = !node.nd_no_mouse_grab;
+    nfx.nx_no_particles = options.find(Truck::Node::OPTION_p_NO_PARTICLES) != std::string::npos;
+    nfx.nx_no_particles = options.find(Truck::Node::OPTION_p_NO_PARTICLES) != std::string::npos;
+    nfx.nx_no_sparks    = options.find(Truck::Node::OPTION_f_NO_SPARKS) != std::string::npos;
     m_gfx_nodes.push_back(nfx);
 }
 
@@ -5720,7 +5377,7 @@ void ActorSpawner::AddExhaust(
     {
         return;
     }
-    exhaust_t exhaust;
+    Exhaust exhaust;
     exhaust.emitterNode = emitter_node_idx;
     exhaust.directionNode = direction_node_idx;
 
@@ -5755,42 +5412,27 @@ void ActorSpawner::AddExhaust(
     m_actor->exhausts.push_back(exhaust);
 }
 
-bool ActorSpawner::AddModule(Ogre::String const & module_name)
-{
-    auto result = m_file->user_modules.find(module_name);
-
-    if (result != m_file->user_modules.end())
-    {
-        m_selected_modules.push_back(result->second);
-        LOG(" == ActorSpawner: Module added to configuration: " + module_name);
-        return true;
-    }
-    this->AddMessage(Message::TYPE_WARNING, "Selected module not found: " + module_name);
-    return false;
-}
-
-void ActorSpawner::ProcessCinecam(RigDef::Cinecam & def)
+void ActorSpawner::ProcessCinecam(Truck::Cinecam & def)
 {
     // Node
-    Ogre::Vector3 node_pos = m_spawn_position + def.position;
-    node_t & camera_node = GetAndInitFreeNode(node_pos);
-    camera_node.nd_no_ground_contact = true; // Orig: hardcoded in BTS_CINECAM
-    camera_node.friction_coef = NODE_FRICTION_COEF_DEFAULT; // Node defaults are ignored here.
-    AdjustNodeBuoyancy(camera_node, def.node_defaults);
-    camera_node.volume_coef   = def.node_defaults->volume;
-    camera_node.surface_coef  = def.node_defaults->surface;
-    // NOTE: Not applying the 'node_mass' value here for backwards compatibility - this node must go through initial `Actor::RecalculateNodeMasses()` pass with default weight.
+    node_t & node = GetFreeNode();
+    InitNode(node, m_spawn_position + def.position);
+    node.nd_no_ground_contact = true; // Historical name 'contactless'
+    node.friction_coef = NODE_FRICTION_COEF_DEFAULT;
+    node.surface_coef = NODE_SURFACE_COEF_DEFAULT;
+    node.volume_coef = NODE_VOLUME_COEF_DEFAULT;
 
-    m_actor->ar_minimass[camera_node.pos] = m_file->global_minimass->min_mass;
+    m_actor->ar_minimass[node.pos] = m_state.default_minimass;
 
-    m_actor->ar_cinecam_node[m_actor->ar_num_cinecams] = camera_node.pos;
+    m_actor->ar_cinecam_node[m_actor->ar_num_cinecams] = node.pos;
+    m_actor->ar_cinecam_node_predef_mass[m_actor->ar_num_cinecams] = node.mass;
     m_actor->ar_num_cinecams++;
 
     // Beams
     for (unsigned int i = 0; i < 8; i++)
     {
         int beam_index = m_actor->ar_num_beams;
-        beam_t & beam = AddBeam(camera_node, GetNode(def.nodes[i]), def.beam_defaults, DEFAULT_DETACHER_GROUP);
+        beam_t & beam = AddBeam(node, GetNode(def.nodes[i]));
         beam.bm_type = BEAM_NORMAL;
         CalculateBeamLength(beam);
         beam.k = def.spring;
@@ -5800,27 +5442,33 @@ void ActorSpawner::ProcessCinecam(RigDef::Cinecam & def)
 
 void ActorSpawner::InitNode(node_t & node, Ogre::Vector3 const & position)
 {
-    /* Position */
     node.AbsPosition = position;
     node.RelPosition = position - m_actor->ar_origin;
+
+    node.friction_coef = m_state.default_node_friction;
+    node.volume_coef = m_state.default_node_volume;
+    node.surface_coef = m_state.default_node_surface;
+
+    node.buoyancy = m_state.truckmass / 15.f; // Ignore the 'b' flag in 'set_node_defaults' for backwards compatibility
+    node.mass = 10.f;
 }
 
 void ActorSpawner::InitNode(
     node_t & node, 
     Ogre::Vector3 const & position,
-    std::shared_ptr<RigDef::NodeDefaults> node_defaults
+    Truck::NodeDefaults& node_defaults
 )
 {
     InitNode(node, position);
-    node.friction_coef = node_defaults->friction;
-    node.volume_coef = node_defaults->volume;
-    node.surface_coef = node_defaults->surface;
+    node.friction_coef = m_state.default_node_friction;
+    node.volume_coef = m_state.default_node_surface;
+    node.surface_coef = m_state.default_node_surface;
 }
 
-void ActorSpawner::ProcessGlobals(RigDef::Globals & def)
+void ActorSpawner::ProcessGlobals(Truck::Globals & def)
 {
-    m_actor->m_dry_mass = def.dry_mass;
-    m_actor->m_load_mass = def.cargo_mass;
+    m_state.truckmass = def.dry_mass;
+    m_state.loadmass = def.cargo_mass;
 
     // NOTE: Don't do any material pre-processing here; it'll be done on actual entities (via `SetupNewEntity()`).
     if (! def.material_name.empty())
@@ -5863,30 +5511,6 @@ bool ActorSpawner::CheckAxleLimit(unsigned int count)
     {
         std::stringstream msg;
         msg << "Axle limit (" << MAX_WHEELS/2 << ") exceeded";
-        AddMessage(Message::TYPE_ERROR, msg.str());
-        return false;
-    }
-    return true;
-}
-
-bool ActorSpawner::CheckSubmeshLimit(unsigned int count)
-{
-    if ((m_oldstyle_cab_submeshes.size() + count) > MAX_SUBMESHES)
-    {
-        std::stringstream msg;
-        msg << "Submesh limit (" << MAX_SUBMESHES << ") exceeded";
-        AddMessage(Message::TYPE_ERROR, msg.str());
-        return false;
-    }
-    return true;
-}
-
-bool ActorSpawner::CheckTexcoordLimit(unsigned int count)
-{
-    if ((m_oldstyle_cab_texcoords.size() + count) > MAX_TEXCOORDS)
-    {
-        std::stringstream msg;
-        msg << "Texcoord limit (" << MAX_TEXCOORDS << ") exceeded";
         AddMessage(Message::TYPE_ERROR, msg.str());
         return false;
     }
@@ -5954,7 +5578,7 @@ bool ActorSpawner::CheckScrewpropLimit(unsigned int count)
     return true;
 }
 
-node_t &ActorSpawner:: GetNode(unsigned int node_index)
+node_t &ActorSpawner:: GetNode(NodeIdx_t node_index)
 {
     return m_actor->ar_nodes[node_index];
 }
@@ -5971,6 +5595,14 @@ beam_t & ActorSpawner::GetBeam(unsigned int index)
 
 node_t & ActorSpawner::GetFreeNode()
 {
+    if (m_actor->ar_num_nodes == node_t::INVALID_IDX)
+    {
+        this->AddMessage(Message::TYPE_ERROR,
+            fmt::format("Fatal: actor can't have more than {} nodes.",
+                node_t::INVALID_IDX));
+        throw Exception("");
+    }
+
     node_t & node = m_actor->ar_nodes[m_actor->ar_num_nodes];
     node.pos = m_actor->ar_num_nodes;
     m_actor->ar_num_nodes++;
@@ -6139,7 +5771,7 @@ void ActorSpawner::SetupDefaultSoundSources(Actor *vehicle)
         int turbojet_node = vehicle->ar_aeroengines[i]->getNoderef();
         Ogre::String index_str = TOSTRING(i+1);
 
-        if (vehicle->ar_aeroengines[i]->getType()==AeroEngine::AEROENGINE_TYPE_TURBOJET)
+        if (vehicle->ar_aeroengines[i]->getType()==AEROENGINE_TURBOJET)
         {
             AddSoundSourceInstance(vehicle, "tracks/default_turbojet_start" + index_str, turbojet_node);
             AddSoundSourceInstance(vehicle, "tracks/default_turbojet_lopower" + index_str, turbojet_node);
@@ -6149,7 +5781,7 @@ void ActorSpawner::SetupDefaultSoundSources(Actor *vehicle)
                 AddSoundSourceInstance(vehicle, "tracks/default_turbojet_afterburner" + index_str, turbojet_node);
             }
         }
-        else if (vehicle->ar_aeroengines[i]->getType()==AeroEngine::AEROENGINE_TYPE_TURBOPROP)
+        else if (vehicle->ar_aeroengines[i]->getType()==AEROENGINE_TURBOPROP_PISTONPROP)
         {
             if (((Turboprop*)vehicle->ar_aeroengines[i])->is_piston)
             {
@@ -6201,7 +5833,7 @@ void ActorSpawner::UpdateCollcabContacterNodes()
     }
 }
 
-RigDef::MaterialFlareBinding* ActorSpawner::FindFlareBindingForMaterial(std::string const & material_name)
+Truck::MaterialFlareBinding* ActorSpawner::FindFlareBindingForMaterial(std::string const & material_name)
 {
     for (auto& module: m_selected_modules)
     {
@@ -6216,7 +5848,7 @@ RigDef::MaterialFlareBinding* ActorSpawner::FindFlareBindingForMaterial(std::str
     return nullptr;
 }
 
-RigDef::VideoCamera* ActorSpawner::FindVideoCameraByMaterial(std::string const & material_name)
+Truck::VideoCamera* ActorSpawner::FindVideoCameraByMaterial(std::string const & material_name)
 {
     for (auto& module: m_selected_modules)
     {
@@ -6261,7 +5893,7 @@ Ogre::MaterialPtr ActorSpawner::FindOrCreateCustomizedMaterial(std::string mat_l
         }
 
         // Query 'videocameras'
-        RigDef::VideoCamera* videocam_def = this->FindVideoCameraByMaterial(mat_lookup_name);
+        Truck::VideoCamera* videocam_def = this->FindVideoCameraByMaterial(mat_lookup_name);
         if (videocam_def != nullptr)
         {
             Ogre::MaterialPtr video_mat_shared;
@@ -6292,7 +5924,7 @@ Ogre::MaterialPtr ActorSpawner::FindOrCreateCustomizedMaterial(std::string mat_l
         }
 
         // Resolve 'materialflarebindings'.
-        RigDef::MaterialFlareBinding* mat_flare_def = this->FindFlareBindingForMaterial(mat_lookup_name);
+        Truck::MaterialFlareBinding* mat_flare_def = this->FindFlareBindingForMaterial(mat_lookup_name);
         if (mat_flare_def != nullptr)
         {
             lookup_entry.material_flare_def = mat_flare_def;
@@ -6508,9 +6140,9 @@ void ActorSpawner::FinalizeGfxSetup()
         }
         else if (entry.second.video_camera_def != nullptr) // 'videocameras'
         {
-            this->SetCurrentKeyword(RigDef::File::KEYWORD_VIDEOCAMERA); // Logging
+            this->SetCurrentKeyword(Truck::KEYWORD_VIDEOCAMERA); // Logging
             this->CreateVideoCamera(entry.second.video_camera_def);
-            this->SetCurrentKeyword(RigDef::File::KEYWORD_INVALID); // Logging
+            this->SetCurrentKeyword(Truck::KEYWORD_NONE); // Logging
         }
     }
 
@@ -6522,14 +6154,14 @@ void ActorSpawner::FinalizeGfxSetup()
     // Load dashboard layouts
     for (auto& module: m_selected_modules)
     {
-        if (module->gui_settings != nullptr)
+        if (module->gui_settings.size() > 0)
         {
-            for (std::string& layout: module->gui_settings->dashboard_layouts)
+            for (std::string& layout: module->gui_settings.back().dashboard_layouts)
             {
                 m_actor->ar_dashboard->loadDashBoard(layout, false);
             }
 
-            for (std::string& layout: module->gui_settings->rtt_dashboard_layouts)
+            for (std::string& layout: module->gui_settings.back().rtt_dashboard_layouts)
             {
                 m_actor->ar_dashboard->loadDashBoard(layout, true);
             }
@@ -6617,10 +6249,9 @@ void ActorSpawner::FinalizeGfxSetup()
         m_actor->m_gfx_actor->AddRod(bv.beam_index, node1, node2, bv.material_name.c_str(), bv.visible, bv.diameter);
     }
 
+
     //add the cab visual
-    // TODO: The 'cab mesh' functionality is a legacy quagmire, 
-    //        data are scattered across `Actor`, `GfxActor` and `FlexObj` - research and unify!! ~ only_a_ptr, 04/2018
-    if (!m_oldstyle_cab_texcoords.empty() && m_actor->ar_num_cabs>0)
+    if (m_state.texcoords.size() > 0 && m_actor->ar_num_cabs > 0)
     {
         //the cab materials are as follow:
         //texname: base texture with emissive(2 pass) or without emissive if none available(1 pass), alpha cutting
@@ -6684,16 +6315,27 @@ void ActorSpawner::FinalizeGfxSetup()
         }
         backmat->compile();
 
+        // Convert retro-style defs to modern-style defs
+        std::vector<CabSubmesh> submeshes;
+        for (int i = 0; i < m_state.free_sub; i++)
+        {
+            CabSubmesh submesh;
+            submesh.backmesh_type = m_state.subisback[i];
+            submesh.cabs_pos = m_state.subcabs[i];
+            submesh.texcoords_pos = m_state.subtexcoords[i];
+            submeshes.push_back(submesh);
+        }
+
         char cab_material_name_cstr[1000] = {};
         strncpy(cab_material_name_cstr, m_cab_material_name.c_str(), 999);
         std::string mesh_name = this->ComposeName("VehicleCabMesh", 0);
         FlexObj* cab_mesh =new FlexObj(
             m_actor->m_gfx_actor.get(),
             m_actor->ar_nodes,
-            m_oldstyle_cab_texcoords,
+            m_state.texcoords,
             m_actor->ar_num_cabs,
             m_actor->ar_cabs,
-            m_oldstyle_cab_submeshes,
+            submeshes,
             cab_material_name_cstr,
             mesh_name.c_str(),
             backmatname,
@@ -6762,12 +6404,12 @@ void ActorSpawner::FinalizeGfxSetup()
                 ticket.meshwheel_def->mesh_name,
                 ticket.meshwheel_def->material_name,
                 ticket.meshwheel_def->rim_radius,
-                ticket.meshwheel_def->side != RigDef::MeshWheel::SIDE_RIGHT
+                ticket.meshwheel_def->side != Truck::MeshWheel::SIDE_RIGHT
                 );
         }
         else if (ticket.flexbodywheel_def != nullptr)
         {
-            RigDef::FlexBodyWheel& def = *ticket.flexbodywheel_def;
+            Truck::FlexBodyWheel& def = *ticket.flexbodywheel_def;
             this->BuildMeshWheelVisuals(
                 ticket.wheel_index,
                 ticket.base_node_index,
@@ -6777,18 +6419,18 @@ void ActorSpawner::FinalizeGfxSetup()
                 def.rim_mesh_name,
                 "tracks/trans", // Rim material name. Original parser: was hardcoded in BTS_FLEXBODYWHEELS
                 def.rim_radius,
-                def.side != RigDef::MeshWheel::SIDE_RIGHT
+                def.side != Truck::MeshWheel::SIDE_RIGHT
                 );
 
             int num_nodes = def.num_rays * 4;
-            std::vector<unsigned int> node_indices;
+            std::vector<NodeIdx_t> node_indices;
             node_indices.reserve(num_nodes);
             for (int i = 0; i < num_nodes; ++i)
             {
                 node_indices.push_back( ticket.base_node_index + i );
             }
 
-            RigDef::Flexbody flexbody_def;
+            Truck::Flexbody flexbody_def;
             flexbody_def.mesh_name = def.tyre_mesh_name;
             flexbody_def.offset = Ogre::Vector3(0.5,0,0);
 
@@ -6823,11 +6465,11 @@ void ActorSpawner::FinalizeGfxSetup()
 
     m_actor->GetGfxActor()->RegisterProps(m_props, m_driverseat_prop_index);
 
-    if (!m_help_material_name.empty())
+    if (m_state.helpmat != "")
     {
         try
         {
-            Ogre::MaterialPtr mat = Ogre::MaterialManager::getSingleton().getByName(m_help_material_name, m_custom_resource_group);
+            Ogre::MaterialPtr mat = Ogre::MaterialManager::getSingleton().getByName(m_state.helpmat, m_custom_resource_group);
             m_actor->GetGfxActor()->GetAttributes().xa_help_mat = mat;
             if (mat &&
                 mat->getNumTechniques() > 0 &&
@@ -6843,16 +6485,16 @@ void ActorSpawner::FinalizeGfxSetup()
         catch (Ogre::Exception& e)
         {
             this->AddMessage(Message::TYPE_ERROR,
-                "Failed to load `help` material '" + m_help_material_name + "', message:" + e.getFullDescription());
+                "Failed to load `help` material '" + m_state.helpmat + "', message:" + e.getFullDescription());
         }
     }
 }
 
-void ActorSpawner::ValidateRotator(int id, int axis1, int axis2, int *nodes1, int *nodes2)
+void ActorSpawner::ValidateRotator(int id, int axis1, int axis2, NodeIdx_t *nodes1, NodeIdx_t *nodes2)
 {
-    const auto eps = 0.001f;
-    const auto ax1 = m_actor->ar_nodes[axis1].AbsPosition;
-    const auto ax2 = m_actor->ar_nodes[axis2].AbsPosition;
+    const float eps = 0.001f;
+    const Ogre::Vector3 ax1 = m_actor->ar_nodes[axis1].AbsPosition;
+    const Ogre::Vector3 ax2 = m_actor->ar_nodes[axis2].AbsPosition;
     Ogre::Plane pl = Ogre::Plane((ax1 - ax2).normalisedCopy(), 0);
 
     Ogre::Vector3 a1 = pl.projectVector(ax1 - m_actor->ar_nodes[nodes1[0]].AbsPosition);
@@ -6943,7 +6585,7 @@ Ogre::ManualObject* CreateVideocameraDebugMesh()
     return mo;
 }
 
-void ActorSpawner::CreateVideoCamera(RigDef::VideoCamera* def)
+void ActorSpawner::CreateVideoCamera(Truck::VideoCamera* def)
 {
     try
     {
@@ -7156,7 +6798,7 @@ void ActorSpawner::HandleException()
     {
         // Add the message silently, OGRE already printed it to RoR.log
         RoR::Str<2000> txt;
-        txt << "(Keyword: " << RigDef::File::KeywordToString(m_current_keyword)
+        txt << "(Keyword: " << Truck::Document::KeywordToString(m_current_keyword)
             << ") " << ogre_e.getFullDescription();
         RoR::App::GetConsole()->putMessage(
             RoR::Console::CONSOLE_MSGTYPE_ACTOR, RoR::Console::CONSOLE_SYSTEM_ERROR, txt.ToCStr());
@@ -7186,3 +6828,94 @@ Ogre::ParticleSystem* ActorSpawner::CreateParticleSystem(std::string const & nam
     psys->setVisibilityFlags(DEPTHMAP_DISABLED); // disable particles in depthmap
     return psys;
 }
+
+void ActorSpawner::ProcessNodeDefaults(int pos)
+{
+    int n = m_cur_module->node_defaults[pos]._num_args;
+
+    m_state.default_node_loadweight          = m_cur_module->node_defaults[pos].loadweight;
+    if (n > 2) m_state.default_node_friction = m_cur_module->node_defaults[pos].friction;
+    if (n > 3) m_state.default_node_volume   = m_cur_module->node_defaults[pos].volume;
+    if (n > 4) m_state.default_node_surface  = m_cur_module->node_defaults[pos].surface;
+    if (n > 5) m_state.default_node_options  = m_cur_module->node_defaults[pos].options;
+
+    if (m_state.default_node_friction < 0)   m_state.default_node_friction=NODE_FRICTION_COEF_DEFAULT;
+    if (m_state.default_node_volume < 0)     m_state.default_node_volume=NODE_VOLUME_COEF_DEFAULT;
+    if (m_state.default_node_surface < 0)    m_state.default_node_surface=NODE_SURFACE_COEF_DEFAULT;
+    if (m_state.default_node_loadweight < 0) m_state.default_node_loadweight=NODE_LOADWEIGHT_DEFAULT;
+    if (n <= 4) m_state.default_node_options = "";
+}
+
+void ActorSpawner::ProcessInertiaDefaults(int pos)
+{
+    int n = m_cur_module->inertia_defaults[pos]._num_args;
+    m_state.inertia_startDelay                       = m_cur_module->inertia_defaults[pos].start_delay_factor;
+    if (n > 2) m_state.inertia_stopDelay             = m_cur_module->inertia_defaults[pos].stop_delay_factor;
+    if (n > 3) m_state.inertia_default_startFunction = m_cur_module->inertia_defaults[pos].start_function;
+    if (n > 4) m_state.inertia_default_stopFunction  = m_cur_module->inertia_defaults[pos].stop_function;
+
+    if (m_state.inertia_startDelay < 0 || m_state.inertia_stopDelay < 0)
+    {
+        // reset it
+        m_state.inertia_startDelay = -1;
+        m_state.inertia_stopDelay  = -1;
+        m_state.inertia_default_startFunction = "";
+        m_state.inertia_default_stopFunction = "";
+    }
+}
+
+void ActorSpawner::ProcessBeamDefaults(int pos)
+{
+    int n = m_cur_module->beam_defaults[pos]._num_args;
+    float tmpdefault_plastic_coef=-1.0f;
+
+    m_state.default_spring =          m_cur_module->beam_defaults[pos].springiness;
+    if (n > 2) m_state.default_damp            = m_cur_module->beam_defaults[pos].damping_constant;
+    if (n > 3) m_state.default_deform          = m_cur_module->beam_defaults[pos].deformation_threshold;
+    if (n > 4) m_state.default_break           = m_cur_module->beam_defaults[pos].breaking_threshold;
+    if (n > 5) m_state.default_beam_diameter   = m_cur_module->beam_defaults[pos].visual_beam_diameter;
+    if (n > 6) m_state.default_beam_material   = m_cur_module->beam_defaults[pos].beam_material_name;
+    if (n > 7) tmpdefault_plastic_coef         = m_cur_module->beam_defaults[pos].plastic_deform_coef;
+
+    if (m_state.default_spring<0) m_state.default_spring=DEFAULT_SPRING;
+    if (m_state.default_damp<0) m_state.default_damp=DEFAULT_DAMP;
+    if (m_state.default_deform<0) m_state.default_deform=BEAM_DEFORM;
+    if (m_state.default_break<0) m_state.default_break=BEAM_BREAK;
+    if (m_state.default_beam_diameter<0) m_state.default_beam_diameter=DEFAULT_BEAM_DIAMETER;
+
+    // get the old 400k deformation limit for trucks with beams and set_beam_defaults based on old physics (pre beamv2)
+    if (!m_state.enable_advanced_deformation && m_state.default_deform < BEAM_DEFORM)
+    {
+        m_state.default_deform=BEAM_DEFORM;
+    }
+
+    if (tmpdefault_plastic_coef >=0.0f)
+    {
+        m_state.beam_creak=0.0f;
+        m_state.default_plastic_coef=m_cur_module->beam_defaults[pos].plastic_deform_coef;
+    }
+}
+
+void ActorSpawner::ProcessBeamDefaultsScale(int pos)
+{
+    int n = m_cur_module->beam_defaults_scale[pos]._num_args;
+
+    m_state.default_spring_scale            = m_cur_module->beam_defaults_scale[pos].springiness;
+    if (n > 2) m_state.default_damp_scale   = m_cur_module->beam_defaults_scale[pos].damping_constant;
+    if (n > 3) m_state.default_deform_scale = m_cur_module->beam_defaults_scale[pos].deformation_threshold_constant;
+    if (n > 4) m_state.default_break_scale  = m_cur_module->beam_defaults_scale[pos].breaking_threshold_constant;
+}
+
+void ActorSpawner::ProcessCollisionRangePreset(int pos)
+{
+}
+
+void ActorSpawner::ProcessManagedMatOptions(int pos)
+{
+    m_state.managedmaterials_doublesided = m_cur_module->managed_mat_options[pos].double_sided;
+}
+
+void ActorSpawner::ProcessSkeletonSettings(int pos)
+{
+}
+

@@ -162,8 +162,7 @@ Actor* GameContext::SpawnActor(ActorSpawnRequest& rq)
         rq.asr_filename = rq.asr_cache_entry->fname;
     }
 
-    std::shared_ptr<RigDef::File> def = m_actor_manager.FetchActorDef(
-        rq.asr_filename, rq.asr_origin == ActorSpawnRequest::Origin::TERRN_DEF);
+    Truck::DocumentPtr def = m_actor_manager.FetchTruckDocument(rq);
     if (def == nullptr)
     {
         return nullptr; // Error already reported
@@ -192,8 +191,11 @@ Actor* GameContext::SpawnActor(ActorSpawnRequest& rq)
 
     Actor* fresh_actor = m_actor_manager.CreateActorInstance(rq, def);
 
+    if (!fresh_actor)
+        return nullptr;
+
     // lock slide nodes after spawning the actor?
-    if (def->slide_nodes_connect_instantly)
+    if (fresh_actor->ar_slidenodes_connect_instantly)
     {
         fresh_actor->ToggleSlideNodeLock();
     }
@@ -381,7 +383,7 @@ void GameContext::ChangePlayerActor(Actor* actor)
             float h = prev_player_actor->getMinCameraRadius();
             float rotation = prev_player_actor->getRotation() - Ogre::Math::HALF_PI;
             Ogre::Vector3 position = prev_player_actor->getPosition();
-            if (prev_player_actor->ar_cinecam_node[0] != -1)
+            if (prev_player_actor->ar_cinecam_node[0] != node_t::INVALID_IDX)
             {
                 // actor has a cinecam (find optimal exit position)
                 Ogre::Vector3 l = position - 2.0f * prev_player_actor->GetCameraRoll();
@@ -824,7 +826,7 @@ void GameContext::UpdateSimInputEvents(float dt)
             {
                 if (!actor->ar_driveable)
                     continue;
-                if (actor->ar_cinecam_node[0] == -1)
+                if (actor->ar_cinecam_node[0] == node_t::INVALID_IDX)
                 {
                     LOG("cinecam missing, cannot enter the actor!");
                     continue;

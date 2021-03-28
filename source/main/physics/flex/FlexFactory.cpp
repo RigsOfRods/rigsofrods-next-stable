@@ -30,7 +30,7 @@
 #include "FlexMeshWheel.h"
 #include "GfxScene.h"
 #include "PlatformUtils.h"
-#include "RigDef_File.h"
+#include "TruckFileFormat.h"
 #include "ActorSpawner.h"
 
 #include <OgreMeshManager.h>
@@ -60,12 +60,12 @@ FlexFactory::FlexFactory(ActorSpawner* rig_spawner):
 }
 
 FlexBody* FlexFactory::CreateFlexBody(
-    RigDef::Flexbody* def,
-    const int ref_node, 
-    const int x_node, 
-    const int y_node, 
+    Truck::Flexbody* def,
+    NodeIdx_t ref_node, 
+    NodeIdx_t x_node, 
+    NodeIdx_t y_node, 
     Ogre::Quaternion const & rot, 
-    std::vector<unsigned int> & node_indices,
+    std::vector<NodeIdx_t> & node_indices,
     std::string resource_group_name)
 {
     Ogre::MeshPtr common_mesh = Ogre::MeshManager::getSingleton().load(def->mesh_name, resource_group_name);

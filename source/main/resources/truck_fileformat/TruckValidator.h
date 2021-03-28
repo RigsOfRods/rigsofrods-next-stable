@@ -20,26 +20,26 @@
 */
 
 /** 
-    @file   RigDef_Validator.h
+    @file
     @author Petr Ohlidal
     @date   12/2013
     @brief  .truck format validator
 
     TERMINOLOGY:
         Module = An optional section of .truck file.
-        Root module = The default, required module.
+        Implicit module = The default, required module.
         Configuration = a set of modules the player chose.
 */
 
 #pragma once
 
-#include "RigDef_File.h"
+#include "TruckFileFormat.h"
 
 #include <memory>
 #include <OgreString.h>
 
-namespace RigDef
-{
+namespace RoR {
+namespace Truck {
 
 /**
 * Performs a formal validation of the file (missing required parts, conflicts of modules, etc...)
@@ -64,13 +64,10 @@ public:
     /**
     * Prepares the validation.
     */
-    void Setup(std::shared_ptr<RigDef::File> file);
+    void Setup(Truck::DocumentPtr truck);
 
-    /**
-    * Adds a vehicle module to the validated configuration.
-    * @param module_name A module from the validated rig-def file.
-    */
-    bool AddModule(Ogre::String const & module_name);
+
+    void AddModule(Truck::ModulePtr modul);
 
     bool Validate();
 
@@ -81,28 +78,7 @@ public:
 
 private:
 
-    /**
-    * Finds section in configuration and performs checks.
-    * @param unique Is this section required to be unique?
-    * @param required Is this section required?
-    * @return True if all conditions were met.
-    */
-    bool CheckSection(RigDef::File::Keyword keyword, bool unique, bool required);
 
-    /**
-    * Checks if a module contains a section.
-    */
-    bool HasModuleKeyword(std::shared_ptr<RigDef::File::Module> module, RigDef::File::Keyword keyword);
-
-    /**
-    * Inline-ection 'submesh_groundmodel', unique across all modules.
-    */
-    bool CheckSectionSubmeshGroundmodel();
-
-    /**
-    * Checks there's at least 1 forward gear.
-    */
-    bool CheckGearbox();
 
     void AddMessage(Validator::Message::Type type, Ogre::String const & text);
 
@@ -110,31 +86,32 @@ private:
 /* Individual section checkers.                                               */
 /* -------------------------------------------------------------------------- */	
 
-    bool CheckShock2(RigDef::Shock2 & shock2);
+    bool CheckShock2(Truck::Shock2 & shock2);
 
-    bool CheckShock3(RigDef::Shock3 & shock3);
+    bool CheckShock3(Truck::Shock3 & shock3);
 
-    bool CheckAnimator(RigDef::Animator & def);
+    bool CheckAnimator(Truck::Animator & def);
 
-    bool CheckCommand(RigDef::Command2 & def);
+    bool CheckCommand(Truck::Command2 & def);
 
-    bool CheckTrigger(RigDef::Trigger & def);
+    bool CheckTrigger(Truck::Trigger & def);
 
     /**
     * Section 'videocamera'.
     */
-    bool CheckVideoCamera(RigDef::VideoCamera & def);
+    bool CheckVideoCamera(Truck::VideoCamera & def);
 
-    bool CheckFlare2(RigDef::Flare2 & def);
+    bool CheckFlare2(Truck::Flare2 & def);
 
 /* -------------------------------------------------------------------------- */
 /* Properties                                                                 */
 /* -------------------------------------------------------------------------- */
 
-    std::shared_ptr<RigDef::File> m_file; //!< The parsed input file.
-    std::list<std::shared_ptr<RigDef::File::Module>> m_selected_modules;
+    Truck::DocumentPtr m_truck;
+    std::list<Truck::ModulePtr> m_selected_modules;
     bool m_check_beams;
 
 };
 
-} // namespace RigDef
+} // namespace Truck
+} // namespace RoR

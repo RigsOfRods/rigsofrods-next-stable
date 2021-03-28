@@ -185,17 +185,18 @@ set(SOURCE_FILES
         resources/ContentManager.{h,cpp}
         resources/otc_fileformat/OTCFileFormat.{h,cpp}
         resources/odef_fileformat/ODefFileFormat.{h,cpp}
-        resources/rig_def_fileformat/RigDef_File.{h,cpp}
-        resources/rig_def_fileformat/RigDef_Node.{h,cpp}
-        resources/rig_def_fileformat/RigDef_Parser.{h,cpp}
-        resources/rig_def_fileformat/RigDef_Prerequisites.h
-        resources/rig_def_fileformat/RigDef_Regexes.h
-        resources/rig_def_fileformat/RigDef_SequentialImporter.{h,cpp}
-        resources/rig_def_fileformat/RigDef_Serializer.{h,cpp}
-        resources/rig_def_fileformat/RigDef_Validator.{h,cpp}
         resources/skin_fileformat/SkinFileFormat.{h,cpp}
         resources/terrn2_fileformat/Terrn2FileFormat.{h,cpp}
         resources/tobj_fileformat/TObjFileFormat.{h,cpp}
+        resources/truck_fileformat/TruckCommon.h
+        resources/truck_fileformat/TruckFileFormat.{h,cpp}
+        resources/truck_fileformat/TruckNodesBeams.h
+        resources/truck_fileformat/TruckParser.{h,cpp}
+        resources/truck_fileformat/TruckPresets.h
+        resources/truck_fileformat/TruckRegexes.h
+        # Disabled while remaking parser 
+        #resources/truck_fileformat/TruckSerializer.{h,cpp}
+        resources/truck_fileformat/TruckValidator.{h,cpp}
         system/AppCommandLine.cpp
         system/AppConfig.cpp
         system/Console.{h,cpp}
@@ -320,10 +321,10 @@ target_include_directories(${BINNAME} PRIVATE
         resources
         resources/odef_fileformat/
         resources/otc_fileformat/
-        resources/rig_def_fileformat
         resources/skin_fileformat
         resources/terrn2_fileformat
         resources/tobj_fileformat
+        resources/truck_fileformat
         system
         rig_editor
         rig_editor/rig_data

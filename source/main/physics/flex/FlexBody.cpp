@@ -27,7 +27,7 @@
 #include "FlexFactory.h"
 #include "GfxActor.h"
 #include "GfxScene.h"
-#include "RigDef_File.h"
+#include "TruckFileFormat.h"
 
 #include <Ogre.h>
 
@@ -35,15 +35,15 @@ using namespace Ogre;
 using namespace RoR;
 
 FlexBody::FlexBody(
-    RigDef::Flexbody* def,
+    Truck::Flexbody* def,
     RoR::FlexBodyCacheData* preloaded_from_cache,
     RoR::GfxActor* gfx_actor,
     Ogre::Entity* ent,
-    int ref,
-    int nx,
-    int ny,
+    NodeIdx_t ref,
+    NodeIdx_t nx,
+    NodeIdx_t ny,
     Ogre::Quaternion const & rot,
-    std::vector<unsigned int> & node_indices
+    std::vector<NodeIdx_t> & node_indices
 ):
       m_camera_mode(-2)
     , m_center_offset(def->offset)
@@ -63,6 +63,8 @@ FlexBody::FlexBody(
     , m_src_colors(nullptr)
     , m_gfx_actor(gfx_actor)
 {
+    ROR_ASSERT(m_node_x != node_t::INVALID_IDX);
+    ROR_ASSERT(m_node_y != node_t::INVALID_IDX);
 
     Ogre::Vector3* vertices = nullptr;
 
@@ -72,7 +74,7 @@ FlexBody::FlexBody(
 
     RoR::GfxActor::SimBuffer::NodeSB* nodes = m_gfx_actor->GetSimNodeBuffer();
 
-    if (ref >= 0)
+    if (m_node_center != node_t::INVALID_IDX)
     {
         Vector3 diffX = nodes[nx].AbsPosition-nodes[ref].AbsPosition;
         Vector3 diffY = nodes[ny].AbsPosition-nodes[ref].AbsPosition;
@@ -395,7 +397,7 @@ FlexBody::FlexBody(
                 LOG("FLEXBODY ERROR on mesh "+def->mesh_name+": REF node not found");
                 closest_node_index = 0;
             }
-            m_locators[i].ref=closest_node_index;            
+            m_locators[i].ref=closest_node_index;
 
             //search the second nearest node as the X vector
             closest_node_distance = std::numeric_limits<float>::max();

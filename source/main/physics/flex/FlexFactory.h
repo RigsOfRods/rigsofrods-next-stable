@@ -30,7 +30,7 @@
 #include "BitFlags.h"
 #include "ForwardDeclarations.h"
 #include "Locator_t.h"
-#include "RigDef_Prerequisites.h"
+#include "TruckFileFormat.h"
 
 #include <OgreVector3.h>
 #include <OgreColourValue.h>
@@ -166,12 +166,12 @@ public:
     FlexFactory(ActorSpawner* spawner);
 
     FlexBody* CreateFlexBody(
-        RigDef::Flexbody* def,
-        const int ref_node, 
-        const int x_node, 
-        const int y_node, 
+        Truck::Flexbody* def,
+        NodeIdx_t ref_node, 
+        NodeIdx_t x_node, 
+        NodeIdx_t y_node, 
         Ogre::Quaternion const & rot, 
-        std::vector<unsigned int> & node_indices,
+        std::vector<NodeIdx_t> & node_indices,
         std::string resource_group_name);
 
     FlexMeshWheel* CreateFlexMeshWheel(

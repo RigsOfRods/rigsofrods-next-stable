@@ -1816,15 +1816,15 @@ void RoR::GfxActor::UpdateSimDataBuffer()
         AeroEngine* src = m_actor->ar_aeroengines[i];
         SimBuffer::AeroEngineSB& dst = m_simbuf.simbuf_aeroengines[i];
 
+        dst.simbuf_ae_type       = src->getType();
         dst.simbuf_ae_throttle   = src->getThrottle();
         dst.simbuf_ae_rpm        = src->getRPM();
         dst.simbuf_ae_rpmpc      = src->getRPMpc();
         dst.simbuf_ae_rpm        = src->getRPM();
-        dst.simbuf_ae_turboprop  = (src->getType() == AeroEngine::AEROENGINE_TYPE_TURBOPROP);
         dst.simbuf_ae_ignition   = src->getIgnition();
         dst.simbuf_ae_failed     = src->isFailed();
 
-        if (dst.simbuf_ae_turboprop)
+        if (dst.simbuf_ae_type == AeroEngineType::AEROENGINE_TURBOPROP_PISTONPROP)
         {
             Turboprop* tp = static_cast<Turboprop*>(src);
             dst.simbuf_tp_aetorque = (100.0 * tp->indicated_torque / tp->max_torque); // TODO: Code ported as-is from calcAnimators(); what does it do? ~ only_a_ptr, 06/2018
@@ -2722,7 +2722,7 @@ void RoR::GfxActor::CalcPropAnimation(const int flag_state, float& cstate, int& 
             div++;
         }
 
-        if (m_simbuf.simbuf_aeroengines[aenum].simbuf_ae_turboprop) // If it's a turboprop or pistonprop...
+        if (m_simbuf.simbuf_aeroengines[aenum].simbuf_ae_type == AEROENGINE_TURBOPROP_PISTONPROP)
         {
             if (flag_state & PROP_ANIM_FLAG_AETORQUE)
             {
@@ -3193,7 +3193,7 @@ void RoR::GfxActor::UpdateFlares(float dt_sec, bool is_player)
     int num_flares = static_cast<int>(m_actor->ar_flares.size());
     for (int i=0; i<num_flares; ++i)
     {
-        flare_t& flare = m_actor->ar_flares[i];
+        Flare& flare = m_actor->ar_flares[i];
         
         //TODO: Following code is a quick+dirty port from `Actor::updateFlares()` - tidy it up! ~only_a_ptr, 06/2018
 

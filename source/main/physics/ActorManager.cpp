@@ -45,7 +45,8 @@
 #include "Network.h"
 #include "PointColDetector.h"
 #include "Replay.h"
-#include "RigDef_Validator.h"
+#include "TruckSerializer.h"
+#include "TruckValidator.h"
 #include "ActorSpawner.h"
 #include "ScriptEngine.h"
 #include "SoundScriptManager.h"
@@ -53,6 +54,8 @@
 #include "ThreadPool.h"
 #include "Utils.h"
 #include "VehicleAI.h"
+
+#include <fmt/format.h>
 
 using namespace Ogre;
 using namespace RoR;
@@ -74,7 +77,7 @@ ActorManager::~ActorManager()
     this->SyncWithSimThread(); // Wait for sim task to finish
 }
 
-void ActorManager::SetupActor(Actor* actor, ActorSpawnRequest rq, std::shared_ptr<RigDef::File> def)
+void ActorManager::SetupActor(Actor* actor, ActorSpawnRequest rq, Truck::DocumentPtr def)
 {
     // ~~~~ Code ported from Actor::Actor()
 
@@ -83,7 +86,7 @@ void ActorManager::SetupActor(Actor* actor, ActorSpawnRequest rq, std::shared_pt
     // ~~~~ Code ported from Actor::LoadActor()
     //      LoadActor(def, beams_parent, pos, rot, spawnbox, cache_entry_number)
     //      bool Actor::LoadActor(
-    //          std::shared_ptr<RigDef::File> def,
+    //          Truck::DocumentPtr def,
     //          Ogre::SceneNode* parent_scene_node,
     //          Ogre::Vector3 const& spawn_position,
     //          Ogre::Quaternion& spawn_rotation,
@@ -94,13 +97,12 @@ void ActorManager::SetupActor(Actor* actor, ActorSpawnRequest rq, std::shared_pt
 
     ActorSpawner spawner;
     spawner.Setup(actor, def, parent_scene_node, rq.asr_position);
-    /* Setup modules */
-    spawner.AddModule(def->root_module);
-    if (!actor->m_section_config.empty())
+    spawner.SpawnActor(rq.asr_config);
+
+    if (App::diag_actor_dump->GetBool())
     {
-        spawner.AddModule(actor->m_section_config);
+        actor->WriteDiagnosticDump(actor->ar_filename + "_dump_raw.txt"); // Saves file to 'logs'
     }
-    spawner.SpawnActor();
 
     /* POST-PROCESSING (Old-spawn code from Actor::loadTruck2) */
 
@@ -207,17 +209,6 @@ void ActorManager::SetupActor(Actor* actor, ActorSpawnRequest rq, std::shared_pt
         }
     }
     actor->m_min_camera_radius = std::sqrt(actor->m_min_camera_radius) * 1.2f; // twenty percent buffer
-
-    // fix up submesh collision model
-    std::string subMeshGroundModelName = spawner.GetSubmeshGroundmodelName();
-    if (!subMeshGroundModelName.empty())
-    {
-        actor->ar_submesh_ground_model = App::GetSimTerrain()->GetCollisions()->getGroundModelByString(subMeshGroundModelName);
-        if (!actor->ar_submesh_ground_model)
-        {
-            actor->ar_submesh_ground_model = App::GetSimTerrain()->GetCollisions()->defaultgm;
-        }
-    }
 
     // Set beam defaults
     for (int i = 0; i < actor->ar_num_beams; i++)
@@ -331,9 +322,14 @@ void ActorManager::SetupActor(Actor* actor, ActorSpawnRequest rq, std::shared_pt
     }
 
     LOG(" ===== DONE LOADING VEHICLE");
+
+    if (App::diag_actor_dump->GetBool())
+    {
+        actor->WriteDiagnosticDump(actor->ar_filename + "_dump_recalc.txt"); // Saves file to 'logs'
+    }
 }
 
-Actor* ActorManager::CreateActorInstance(ActorSpawnRequest rq, std::shared_ptr<RigDef::File> def)
+Actor* ActorManager::CreateActorInstance(ActorSpawnRequest rq, Truck::DocumentPtr def)
 {
     Actor* actor = new Actor(m_actor_counter++, static_cast<int>(m_actors.size()), def, rq);
     actor->SetUsedSkin(rq.asr_skin_entry);
@@ -343,9 +339,19 @@ Actor* ActorManager::CreateActorInstance(ActorSpawnRequest rq, std::shared_ptr<R
         actor->sendStreamSetup();
     }
 
-    this->SetupActor(actor, rq, def);
-
-    m_actors.push_back(actor);
+    try
+    {
+        this->SetupActor(actor, rq, def);
+        m_actors.push_back(actor);
+    }
+    catch (std::exception& e)
+    {
+        App::GetConsole()->putMessage(
+            Console::CONSOLE_MSGTYPE_INFO, Console::CONSOLE_SYSTEM_ERROR,
+            fmt::format(_L("Exception ocurred while spawning: {}"), e.what()));
+        delete actor;
+        actor = nullptr;
+    }
 
     return actor;
 }
@@ -871,8 +877,6 @@ void ActorManager::DeleteActorInternal(Actor* actor)
     if (actor == 0)
         return;
 
-    this->SyncWithSimThread();
-
 #ifdef USE_SOCKETW
     if (App::mp_state->GetEnum<MpState>() == RoR::MpState::CONNECTED)
     {
@@ -1182,33 +1186,42 @@ void HandleErrorLoadingTruckfile(std::string filename, std::string exception_msg
     HandleErrorLoadingFile("actor", filename, exception_msg);
 }
 
-std::shared_ptr<RigDef::File> ActorManager::FetchActorDef(std::string filename, bool predefined_on_terrain)
+Truck::DocumentPtr ActorManager::FetchTruckDocument(RoR::ActorSpawnRequest& rq)
 {
-    // Find the user content
-    CacheEntry* cache_entry = App::GetCacheSystem()->FindEntryByFilename(LT_AllBeam, /*partial=*/false, filename);
-    if (cache_entry == nullptr)
+    // Make sure we have ModCache entry
+    if (!rq.asr_cache_entry)
     {
-        HandleErrorLoadingTruckfile(filename, "Truckfile not found in ModCache (probably not installed)");
-        return nullptr;
+        rq.asr_cache_entry = App::GetCacheSystem()->FindEntryByFilename(LT_AllBeam, false, rq.asr_filename);
+        if (rq.asr_cache_entry == nullptr)
+        {
+            HandleErrorLoadingTruckfile(rq.asr_filename, "Truckfile not found in ModCache (probably not installed)");
+            return nullptr;
+        }
     }
 
     // If already parsed, re-use
-    if (cache_entry->actor_def != nullptr)
+    if (rq.asr_cache_entry->actor_def != nullptr)
     {
-        return cache_entry->actor_def;
+        return rq.asr_cache_entry->actor_def;
     }
 
-    // Load the 'truckfile'
+    // Load the truck file
+    App::GetCacheSystem()->LoadResource(*rq.asr_cache_entry);
+    Truck::DocumentPtr def = this->LoadTruckDocument(rq.asr_cache_entry->fname, rq.asr_cache_entry->resource_group);
+    if (!def)
+    {
+        return nullptr; // Error already reported
+    }
+
+    rq.asr_cache_entry->actor_def = def;
+    return def;
+}
+
+Truck::DocumentPtr ActorManager::LoadTruckDocument(std::string const& filename, std::string const& rg_name)
+{
     try
     {
-        Ogre::String resource_filename = filename;
-        Ogre::String resource_groupname;
-        if (!App::GetCacheSystem()->CheckResourceLoaded(resource_filename, resource_groupname)) // Validates the filename and finds resource group
-        {
-            HandleErrorLoadingTruckfile(filename, "Truckfile not found");
-            return nullptr;
-        }
-        Ogre::DataStreamPtr stream = Ogre::ResourceGroupManager::getSingleton().openResource(resource_filename, resource_groupname);
+        Ogre::DataStreamPtr stream = Ogre::ResourceGroupManager::getSingleton().openResource(filename, rg_name);
 
         if (stream.isNull() || !stream->isReadable())
         {
@@ -1216,40 +1229,13 @@ std::shared_ptr<RigDef::File> ActorManager::FetchActorDef(std::string filename, 
             return nullptr;
         }
 
-        RoR::LogFormat("[RoR] Parsing truckfile '%s'", resource_filename.c_str());
-        RigDef::Parser parser;
-        parser.Prepare();
-        parser.ProcessOgreStream(stream.getPointer(), resource_groupname);
-        parser.Finalize();
+        RoR::LogFormat("[RoR] Parsing truckfile '%s'", filename.c_str());
+        Truck::Parser parser;
+        parser.ProcessOgreStream(stream.getPointer(), rg_name);
 
-        auto def = parser.GetFile();
+        parser.GetFile()->hash = Utils::Sha1Hash(stream->getAsString());
 
-        // VALIDATING
-        LOG(" == Validating vehicle: " + def->name);
-
-        RigDef::Validator validator;
-        validator.Setup(def);
-
-        if (predefined_on_terrain)
-        {
-            // Workaround: Some terrains pre-load truckfiles with special purpose:
-            //     "soundloads" = play sound effect at certain spot
-            //     "fixes"      = structures of N/B fixed to the ground
-            // These files can have no beams. Possible extensions: .load or .fixed
-            std::string file_extension = filename.substr(filename.find_last_of('.'));
-            Ogre::StringUtil::toLowerCase(file_extension);
-            if ((file_extension == ".load") | (file_extension == ".fixed"))
-            {
-                validator.SetCheckBeams(false);
-            }
-        }
-
-        validator.Validate(); // Sends messages to console
-
-        def->hash = Utils::Sha1Hash(stream->getAsString());
-
-        cache_entry->actor_def = def;
-        return def;
+        return parser.GetFile();
     }
     catch (Ogre::Exception& oex)
     {
@@ -1266,6 +1252,39 @@ std::shared_ptr<RigDef::File> ActorManager::FetchActorDef(std::string filename, 
         HandleErrorLoadingTruckfile(filename, "<Unknown exception occurred>");
         return nullptr;
     }
+}
+
+void ActorManager::ExportTruckDocument(Truck::DocumentPtr def, std::string filename, std::string rg_name)
+{
+#if 0 // Disabled while remaking truck parser
+    try
+    {
+        Ogre::ResourceGroupManager& rgm = Ogre::ResourceGroupManager::getSingleton();
+
+        // Open OGRE stream for writing
+        Ogre::DataStreamPtr stream = rgm.createResource(filename, rg_name, /*overwrite=*/true);
+        if (stream.isNull() || !stream->isWriteable())
+        {
+            OGRE_EXCEPT(Ogre::Exception::ERR_CANNOT_WRITE_TO_FILE,
+                "Stream NULL or not writeable, filename: '" + filename
+                + "', resource group: '" + rg_name + "'");
+        }
+
+        // Serialize actor to string
+        Truck::Serializer serializer(def);
+        serializer.Serialize();
+
+        // Flush the string to file
+        stream->write(serializer.GetOutput().c_str(), serializer.GetOutput().size());
+        stream->close();
+    }
+    catch (Ogre::Exception& oex)
+    {
+        App::GetConsole()->putMessage(Console::CONSOLE_MSGTYPE_ACTOR, Console::CONSOLE_SYSTEM_ERROR,
+                                      fmt::format(_LC("Truck", "Failed to export truck '{}' to resource group '{}', message: {}"),
+                                                  filename, rg_name, oex.getFullDescription()));
+    }
+#endif  // Disabled while remaking truck parser
 }
 
 std::vector<Actor*> ActorManager::GetLocalActors()

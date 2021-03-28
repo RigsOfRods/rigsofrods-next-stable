@@ -20,8 +20,6 @@
 /* maximum limits */
 static const int   MAX_ACTORS                 = 5000;            //!< maximum number of actors per game session
 static const int   MAX_WHEELS                 = 64;              //!< maximum number of wheels per actor
-static const int   MAX_SUBMESHES              = 500;             //!< maximum number of submeshes per actor
-static const int   MAX_TEXCOORDS              = 3000;            //!< maximum number of texture coordinates per actor
 static const int   MAX_CABS                   = 3000;            //!< maximum number of cabs per actor
 static const int   MAX_COMMANDS               = 84;              //!< maximum number of commands per actor
 static const int   MAX_CAMERAS                = 10;              //!< maximum number of cameras per actor
@@ -70,6 +68,8 @@ static const float HOOK_RANGE_DEFAULT           = 0.4f;
 static const float HOOK_SPEED_DEFAULT           = 0.00025f;
 static const float HOOK_LOCK_TIMER_DEFAULT      = 5.0;
 static const int   NODE_LOCKGROUP_DEFAULT       = -1; // all hooks scan all nodes
+static const int   NODE_LOCKGROUP_NOLOCK        = 9999; // special
 static const int   DEFAULT_DETACHER_GROUP       = 0; // default for detaching beam group
+static const float DEFAULT_TIE_MAX_STRESS       = 100000.f;
 
 static const float FLAP_ANGLES[6] = {0.f, -0.07f, -0.17f, -0.33f, -0.67f, -1.f};

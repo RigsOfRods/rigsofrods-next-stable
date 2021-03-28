@@ -23,20 +23,23 @@
 /// @author Petr Ohlidal
 /// @date   10/2014
 
-#include "RigDef_Serializer.h"
+#include "TruckSerializer.h"
 
-#include "RigDef_File.h"
+#include "Application.h"
+#include "GUIManager.h"
+#include "TruckFileFormat.h"
 
 #include <fstream>
 #include <OgreStringConverter.h>
 #include <iomanip>
+#include <unordered_map>
 
-using namespace RigDef;
+using namespace RoR;
+using namespace Truck;
 using namespace std;
 
-Serializer::Serializer(std::shared_ptr<RigDef::File> def_file, Ogre::String const & file_path):
-    m_file_path(file_path),
-    m_rig_def(def_file),
+Serializer::Serializer(Truck::DocumentPtr truck):
+    m_truck(truck),
     m_node_id_width(5),
     m_float_precision(6),
     m_inertia_function_width(10),
@@ -45,43 +48,67 @@ Serializer::Serializer(std::shared_ptr<RigDef::File> def_file, Ogre::String cons
     m_float_width(10)
 {}
 
-Serializer::~Serializer()
-{}
-
 void Serializer::Serialize()
 {
-    // Open file
-    m_stream.open(m_file_path);
+    // Prepare output
     m_stream.precision(m_float_precision); // Permanent
 
-    // Write header
-    m_stream << m_rig_def->name << endl << endl;
-
     // Write banner
-    m_stream
-        << "; ---------------------------------------------------------------------------- ;" << endl
-        << "; Rigs of Rods project (www.rigsofrods.org)                                    ;" << endl
-        << "; =========================================                                    ;" << endl
-        << ";                                                                              ;" << endl
-        << "; This is a rig definition file.                                               ;" << endl
-        << "; See http://www.rigsofrods.org/wiki/pages/Truck_Description_File for details. ;" << endl
-        << "; ---------------------------------------------------------------------------- ;" << endl
-        << endl;
+    m_stream << "; ---------------------------------------------" << endl
+             << "; Rigs of Rods (www.rigsofrods.org)"             << endl
+             << "; See https://docs.rigsofrods.org for reference" << endl
+             << "; ---------------------------------------------" << endl
+             << endl;
+
+    // Write name
+    m_stream << m_truck->name << endl << endl;
 
     // Select source
-    File::Module* source_module = m_rig_def->root_module.get();
+    Module* source_module = m_truck->root_module.get();
 
     // Write individual elements
     ProcessDescription();
     ProcessAuthors();
-    ProcessGlobals(source_module);
     ProcessFileinfo();
     WriteFlags();
+
+    if (m_truck->global_minimass)
+    {
+        m_stream << "minimass\n\t" << m_truck->global_minimass->min_mass << "\n\n";
+    }
+
+    if (m_truck->guid != "")
+    {
+        m_stream << "guid " << m_truck->guid << "\n\n";
+    }
+    
+    // Modules (aka 'sectionconfig')
+    this->SerializeModule(m_truck->root_module);
+    for (auto module_itor: m_truck->user_modules)
+    {
+        this->SerializeModule(module_itor.second);
+    }
+
+    // Finalize
+    m_stream << "end" << endl;
+}
+
+void Serializer::SerializeModule(Truck::ModulePtr m)
+{
+    Truck::Module* source_module = m.get();
+
+    if (m->name != Truck::ROOT_MODULE_NAME)
+    {
+        m_stream << "section -1 " << m->name << endl;
+    }
+
     ProcessManagedMaterialsAndOptions(source_module);
+    ProcessGlobals(source_module);
 
     // Structure
     ProcessNodes(source_module);
     ProcessBeams(source_module);
+    ProcessCameras(source_module);
     ProcessShocks(source_module);
     ProcessShocks2(source_module);
     ProcessHydros(source_module);
@@ -146,13 +173,14 @@ void Serializer::Serialize()
 
     // Marine
     ProcessScrewprops(source_module);
-    
-    // Finalize
-    m_stream << "end" << endl;
-    m_stream.close();
+
+    if (!m->defined_explicitly)
+    {
+        m_stream << "end_section" << endl;
+    }
 }
 
-void Serializer::ProcessPistonprops(File::Module* module)
+void Serializer::ProcessPistonprops(Module* module)
 {
     if (module->pistonprops.empty())
     {
@@ -164,21 +192,21 @@ void Serializer::ProcessPistonprops(File::Module* module)
     {
         auto & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.axis_node.ToString()
-            << ", " << def.blade_tip_nodes[0].ToString()
-            << ", " << def.blade_tip_nodes[1].ToString()
-            << ", " << def.blade_tip_nodes[2].ToString()
-            << ", " << def.blade_tip_nodes[3].ToString()
-            << ", " << (def.couple_node.IsValidAnyState() ? def.couple_node.ToString() : "-1")
-            << ", " << def.turbine_power_kW
-            << ", " << def.pitch
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.axis_node.Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[0].Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[1].Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[2].Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[3].Str()
+            << ", " << setw(m_node_id_width) << (def.couple_node.IsValidAnyState() ? def.couple_node.Str() : "-1")
+            << ", " << setw(m_float_width) << def.turbine_power_kW
+            << ", " << setw(m_float_width) << def.pitch
             << ", " << def.airfoil;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessTurbojets(File::Module* module)
+void Serializer::ProcessTurbojets(Module* module)
 {
     if (module->turbojets.empty())
     {
@@ -190,20 +218,20 @@ void Serializer::ProcessTurbojets(File::Module* module)
     {
         auto & def = *itor;
 
-        m_stream << "\n\t" << def.front_node.ToString()
-            << ", " << def.back_node.ToString()
-            << ", " << def.side_node.ToString()
-            << ", " << def.is_reversable
-            << ", " << def.dry_thrust
-            << ", " << def.wet_thrust
-            << ", " << def.front_diameter
-            << ", " << def.back_diameter
-            << ", " << def.nozzle_length;
+        m_stream << "\n\t" << setw(m_node_id_width) << def.front_node.Str()
+            << ", " << setw(m_node_id_width) << def.back_node.Str()
+            << ", " << setw(m_node_id_width) << def.side_node.Str()
+            << ", " << setw(2) << def.is_reversable
+            << ", " << setw(m_float_width) << def.dry_thrust
+            << ", " << setw(m_float_width) << def.wet_thrust
+            << ", " << setw(m_float_width) << def.front_diameter
+            << ", " << setw(m_float_width) << def.back_diameter
+            << ", " << setw(m_float_width) << def.nozzle_length;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessScrewprops(File::Module* module)
+void Serializer::ProcessScrewprops(Module* module)
 {
     if (module->screwprops.empty())
     {
@@ -215,23 +243,37 @@ void Serializer::ProcessScrewprops(File::Module* module)
     {
         auto & def = *itor;
 
-        m_stream << "\n\t" << def.prop_node.ToString()
-            << ", " << def.back_node.ToString()
-            << ", " << def.top_node.ToString()
-            << ", " << def.power;
+        m_stream << "\n\t" << setw(m_node_id_width) << def.prop_node.Str()
+            << ", " << setw(m_node_id_width) << def.back_node.Str()
+            << ", " << setw(m_node_id_width) << def.top_node.Str()
+            << ", " << setw(m_float_width) << def.power;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessFusedrag(File::Module* module)
+void Serializer::ProcessFusedrag(Module* module)
 {
-    
-    m_stream << ";fusedrag -- STUB" << endl;
-    
+    m_stream << "fusedrag" << endl;
+    for (Truck::Fusedrag& def: module->fusedrag)
+    {
+        m_stream << "\n\t"
+            << setw(m_node_id_width) << def.front_node.Str() << ", "
+            << setw(m_node_id_width) << def.rear_node.Str() << ", ";
+        if (def.autocalc)
+        {
+            m_stream << "autocalc, " << setw(m_float_width) << def.area_coefficient;
+        }
+        else
+        {
+            m_stream << setw(m_float_width) << def.approximate_width;
+        }
+        m_stream << ", " << def.airfoil_name;
+    }
+
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessTurboprops(File::Module* module)
+void Serializer::ProcessTurboprops(Module* module)
 {
     if (module->turboprops_2.empty())
     {
@@ -241,21 +283,21 @@ void Serializer::ProcessTurboprops(File::Module* module)
     auto end_itor = module->turboprops_2.end();
     for (auto itor = module->turboprops_2.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Turboprop2 & def = *itor;
+        Truck::Turboprop2 & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.axis_node.ToString()
-            << ", " << def.blade_tip_nodes[0].ToString()
-            << ", " << def.blade_tip_nodes[1].ToString()
-            << ", " << def.blade_tip_nodes[2].ToString()
-            << ", " << def.blade_tip_nodes[3].ToString()
-            << ", " << def.turbine_power_kW
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.axis_node.Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[0].Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[1].Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[2].Str()
+            << ", " << setw(m_node_id_width) << def.blade_tip_nodes[3].Str()
+            << ", " << setw(m_float_width) << def.turbine_power_kW
             << ", " << def.airfoil;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessAirbrakes(File::Module* module)
+void Serializer::ProcessAirbrakes(Module* module)
 {
     if (module->airbrakes.empty())
     {
@@ -265,28 +307,28 @@ void Serializer::ProcessAirbrakes(File::Module* module)
     auto end_itor = module->airbrakes.end();
     for (auto itor = module->airbrakes.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Airbrake & def = *itor;
+        Truck::Airbrake & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.x_axis_node.ToString()
-            << ", " << def.y_axis_node.ToString()
-            << ", " << (def.aditional_node.IsValidAnyState() ? def.aditional_node.ToString() : "-1")
-            << ", " << def.offset.x
-            << ", " << def.offset.y
-            << ", " << def.offset.z
-            << ", " << def.width
-            << ", " << def.height
-            << ", " << def.max_inclination_angle
-            << ", " << def.texcoord_x1
-            << ", " << def.texcoord_y1
-            << ", " << def.texcoord_x2
-            << ", " << def.texcoord_y2
-            << ", " << def.lift_coefficient;
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.x_axis_node.Str()
+            << ", " << setw(m_node_id_width) << def.y_axis_node.Str()
+            << ", " << setw(m_node_id_width) << (def.aditional_node.IsValidAnyState() ? def.aditional_node.Str() : "-1")
+            << ", " << setw(m_float_width) << def.offset.x
+            << ", " << setw(m_float_width) << def.offset.y
+            << ", " << setw(m_float_width) << def.offset.z
+            << ", " << setw(m_float_width) << def.width
+            << ", " << setw(m_float_width) << def.height
+            << ", " << setw(m_float_width) << def.max_inclination_angle
+            << ", " << setw(m_float_width) << def.texcoord_x1
+            << ", " << setw(m_float_width) << def.texcoord_y1
+            << ", " << setw(m_float_width) << def.texcoord_x2
+            << ", " << setw(m_float_width) << def.texcoord_y2
+            << ", " << setw(m_float_width) << def.lift_coefficient;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessWings(File::Module* module)
+void Serializer::ProcessWings(Module* module)
 {
     if (module->wings.empty())
     {
@@ -296,35 +338,35 @@ void Serializer::ProcessWings(File::Module* module)
     auto end_itor = module->wings.end();
     for (auto itor = module->wings.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Wing & def = *itor;
+        Truck::Wing & def = *itor;
 
-        m_stream << "\n\t" << def.nodes[0].ToString()
-            << ", " << def.nodes[1].ToString()
-            << ", " << def.nodes[2].ToString()
-            << ", " << def.nodes[3].ToString()
-            << ", " << def.nodes[4].ToString()
-            << ", " << def.nodes[5].ToString()
-            << ", " << def.nodes[6].ToString()
-            << ", " << def.nodes[7].ToString()
-            << ", " << def.tex_coords[0]
-            << ", " << def.tex_coords[1]
-            << ", " << def.tex_coords[2]
-            << ", " << def.tex_coords[3]
-            << ", " << def.tex_coords[4]
-            << ", " << def.tex_coords[5]
-            << ", " << def.tex_coords[6]
-            << ", " << def.tex_coords[7]
-            << ", " << def.control_surface
-            << ", " << def.chord_point
-            << ", " << def.min_deflection
-            << ", " << def.max_deflection
+        m_stream << "\n\t" << setw(m_node_id_width) << def.nodes[0].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[1].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[2].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[3].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[4].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[5].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[6].Str()
+            << ", " << setw(m_node_id_width) << def.nodes[7].Str()
+            << ", " << setw(m_float_width) << def.tex_coords[0]
+            << ", " << setw(m_float_width) << def.tex_coords[1]
+            << ", " << setw(m_float_width) << def.tex_coords[2]
+            << ", " << setw(m_float_width) << def.tex_coords[3]
+            << ", " << setw(m_float_width) << def.tex_coords[4]
+            << ", " << setw(m_float_width) << def.tex_coords[5]
+            << ", " << setw(m_float_width) << def.tex_coords[6]
+            << ", " << setw(m_float_width) << def.tex_coords[7]
+            << ", " << (char)def.control_surface
+            << ", " << setw(m_float_width) << def.chord_point
+            << ", " << setw(m_float_width) << def.min_deflection
+            << ", " << setw(m_float_width) << def.max_deflection
             << ", " << def.airfoil
             << ", " << def.efficacy_coef;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessSoundsources(File::Module* module)
+void Serializer::ProcessSoundsources(Module* module)
 {
     if (module->soundsources.empty())
     {
@@ -334,14 +376,14 @@ void Serializer::ProcessSoundsources(File::Module* module)
     auto end_itor = module->soundsources.end();
     for (auto itor = module->soundsources.begin(); itor != end_itor; ++itor)
     {
-        RigDef::SoundSource & def = *itor;
+        Truck::SoundSource & def = *itor;
 
-        m_stream << "\n\t" << def.node.ToString() << ", " << def.sound_script_name;
+        m_stream << "\n\t" << setw(m_node_id_width) << def.node.Str() << ", " << def.sound_script_name;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessSoundsources2(File::Module* module)
+void Serializer::ProcessSoundsources2(Module* module)
 {
     if (module->soundsources2.empty())
     {
@@ -351,28 +393,28 @@ void Serializer::ProcessSoundsources2(File::Module* module)
     auto end_itor = module->soundsources2.end();
     for (auto itor = module->soundsources2.begin(); itor != end_itor; ++itor)
     {
-        RigDef::SoundSource2 & def = *itor;
+        Truck::SoundSource2 & def = *itor;
 
-        m_stream << "\n\t" << def.node.ToString() 
-            << ", " << def.mode
+        m_stream << "\n\t" << setw(m_node_id_width) << def.node.Str() 
+            << ", " << setw(2) << def.mode
             << ", " << def.sound_script_name;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessExtCamera(File::Module* module)
+void Serializer::ProcessExtCamera(Module* module)
 {
     if (!module->ext_camera)
     {
         return;
     }
-    RigDef::ExtCamera* def = module->ext_camera.get();
+    Truck::ExtCamera* def = module->ext_camera.get();
     m_stream << "extcamera ";
 
     switch (def->mode)
     {
     case ExtCamera::MODE_NODE:
-        m_stream << "node " << def->node.ToString();
+        m_stream << "node " << def->node.Str();
         break;
     case ExtCamera::MODE_CINECAM:
         m_stream << "cinecam";
@@ -385,7 +427,7 @@ void Serializer::ProcessExtCamera(File::Module* module)
         m_stream << "\n\n";
 }
 
-void Serializer::ProcessVideocamera(File::Module* module)
+void Serializer::ProcessVideocamera(Module* module)
 {
     if (module->videocameras.empty())
     {
@@ -395,26 +437,26 @@ void Serializer::ProcessVideocamera(File::Module* module)
     auto end_itor = module->videocameras.end();
     for (auto itor = module->videocameras.begin(); itor != end_itor; ++itor)
     {
-        RigDef::VideoCamera & def = *itor;
+        Truck::VideoCamera & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.left_node.ToString()
-            << ", " << def.bottom_node.ToString()
-            << ", " << (def.alt_reference_node.IsValidAnyState() ? def.alt_reference_node.ToString() : "-1")
-            << ", " << (def.alt_orientation_node.IsValidAnyState() ? def.alt_orientation_node.ToString() : "-1")
-            << ", " << def.offset.x
-            << ", " << def.offset.y
-            << ", " << def.offset.z
-            << ", " << def.rotation.x
-            << ", " << def.rotation.y
-            << ", " << def.rotation.z
-            << ", " << def.field_of_view
-            << ", " << def.texture_width
-            << ", " << def.texture_height
-            << ", " << def.min_clip_distance
-            << ", " << def.max_clip_distance
-            << ", " << def.camera_role
-            << ", " << def.camera_mode
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.left_node.Str()
+            << ", " << setw(m_node_id_width) << def.bottom_node.Str()
+            << ", " << setw(m_node_id_width) << (def.alt_reference_node.IsValidAnyState() ? def.alt_reference_node.Str() : "-1")
+            << ", " << setw(m_node_id_width) << (def.alt_orientation_node.IsValidAnyState() ? def.alt_orientation_node.Str() : "-1")
+            << ", " << setw(m_float_width) << def.offset.x
+            << ", " << setw(m_float_width) << def.offset.y
+            << ", " << setw(m_float_width) << def.offset.z
+            << ", " << setw(m_float_width) << def.rotation.x
+            << ", " << setw(m_float_width) << def.rotation.y
+            << ", " << setw(m_float_width) << def.rotation.z
+            << ", " << setw(m_float_width) << def.field_of_view
+            << ", " << setw(4) << def.texture_width
+            << ", " << setw(4) << def.texture_height
+            << ", " << setw(m_float_width) << def.min_clip_distance
+            << ", " << setw(m_float_width) << def.max_clip_distance
+            << ", " << setw(3) << def.camera_role
+            << ", " << setw(3) << def.camera_mode
             << ", " << def.material_name;
         if (!def.camera_name.empty())
         {
@@ -424,19 +466,19 @@ void Serializer::ProcessVideocamera(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessSetSkeletonSettings(File::Module* module)
+void Serializer::ProcessSetSkeletonSettings(Module* module)
 {
-    RigDef::SkeletonSettings& def = module->skeleton_settings;
+    Truck::SkeletonSettings& def = module->skeleton_settings;
     m_stream << "set_skeleton_settings " << def.visibility_range_meters << ", " << def.beam_thickness_meters << "\n\n";
 }
 
-void Serializer::ProcessGuiSettings(File::Module* module)
+void Serializer::ProcessGuiSettings(Module* module)
 {
     if (!module->gui_settings)
     {
         return;
     }
-    RigDef::GuiSettings* def = module->gui_settings.get();
+    Truck::GuiSettings* def = module->gui_settings.get();
     m_stream << "guisettings"
         << "\n\tspeedoMax: " << def->speedo_highest_kph 
         << "\n\tuseMaxRPM: " << def->use_max_rpm;
@@ -479,7 +521,7 @@ void Serializer::ProcessGuiSettings(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessExhausts(File::Module* module)
+void Serializer::ProcessExhausts(Module* module)
 {
     if (module->exhausts.empty())
     {
@@ -489,38 +531,34 @@ void Serializer::ProcessExhausts(File::Module* module)
     auto end_itor = module->exhausts.end();
     for (auto itor = module->exhausts.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Exhaust & def = *itor;
+        Truck::Exhaust & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.direction_node.ToString()
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.direction_node.Str()
             << ", " << def.particle_name;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessSubmeshGroundmodel(File::Module* module)
+void Serializer::ProcessSubmeshGroundmodel(Module* module)
 {
-    // TODO
-    m_stream << ";submesh_groundmodel -- STUB"<< endl << endl; // Empty line
+    if (!module->submeshes_ground_model_name.empty())
+    {
+        m_stream << "submesh_groundmodel " << module->submeshes_ground_model_name << endl << endl; // Empty line
+    }
 }
 
 #define CAB_PRINT_OPTION_FLAG(VAR, FLAG, CHAR) \
-    if (BITMASK_IS_1(VAR, RigDef::Cab::FLAG)) { m_stream << CHAR; }
+    if (BITMASK_IS_1(VAR, Truck::Cab::FLAG)) { m_stream << CHAR; }
 
 #define CAB_PRINT_OPTION_FUNC(DEF, FUNC, CHAR) \
     if (DEF->FUNC()) { m_stream << CHAR; }
 
-void Serializer::ProcessSubmesh(File::Module* module)
+void Serializer::ProcessSubmesh(Module* module)
 {
-    if (module->submeshes.empty())
+    for (Truck::Submesh & def: module->submeshes)
     {
-        return;
-    }
-    m_stream << "submesh" << endl;
-    auto end_itor = module->submeshes.end();
-    for (auto itor = module->submeshes.begin(); itor != end_itor; ++itor)
-    {
-        RigDef::Submesh & def = *itor;
+        m_stream << "submesh" << endl;
 
         if (def.texcoords.size() > 0)
         {
@@ -528,7 +566,7 @@ void Serializer::ProcessSubmesh(File::Module* module)
             auto texcoord_end = def.texcoords.end();
             for (auto texcoord_itor = def.texcoords.begin(); texcoord_itor != texcoord_end; ++texcoord_itor)
             {
-                m_stream << "\n\t" << texcoord_itor->node.ToString() << ", " << texcoord_itor->u << ", " << texcoord_itor->v;
+                m_stream << "\n\t" << setw(m_node_id_width) << texcoord_itor->node.Str() << ", " << texcoord_itor->u << ", " << texcoord_itor->v;
             }
         }
         if (def.cab_triangles.size() > 0)
@@ -537,9 +575,9 @@ void Serializer::ProcessSubmesh(File::Module* module)
             auto cab_end = def.cab_triangles.end();
             for (auto cab_itor = def.cab_triangles.begin(); cab_itor != cab_end; ++cab_itor)
             {
-                m_stream << "\n\t" << cab_itor->nodes[0].ToString() 
-                    << ", " << cab_itor->nodes[1].ToString() 
-                    << ", " << cab_itor->nodes[2].ToString()
+                m_stream << "\n\t" << setw(m_node_id_width) << cab_itor->nodes[0].Str() 
+                    << ", " << setw(m_node_id_width) << cab_itor->nodes[1].Str() 
+                    << ", " << setw(m_node_id_width) << cab_itor->nodes[2].Str()
                     << ", n";
 
                 // Options
@@ -558,73 +596,80 @@ void Serializer::ProcessSubmesh(File::Module* module)
         {
             m_stream << "\n\tbackmesh";
         }
+        m_stream << endl << endl; // Empty line
     }
-    m_stream << endl << endl; // Empty line
 }
 
-#define PROP_ANIMATION_ADD_FLAG(FLAGS_VAR, AND_VAR, BITMASK_CONST, NAME_STR) \
-    if (AND_VAR) { m_stream << " | "; } \
-    if (BITMASK_IS_1((FLAGS_VAR), RigDef::Animation::BITMASK_CONST)) { \
-        AND_VAR = true; \
-        m_stream << NAME_STR; \
-    }
-
-void Serializer::ProcessDirectiveAddAnimation(RigDef::Animation & anim)
+inline void PropAnimFlag(std::stringstream& out, int flags, bool& join, unsigned int mask, const char* name, char joiner = '|')
 {
-    m_stream << "\n\tadd_animation " << anim.ratio
-        << ", " << anim.lower_limit
-        << ", " << anim.upper_limit
-        << ", source: ";
+    if (flags & mask)
+    {
+        if (join)
+        {
+            out << joiner;
+        }
+        out << name;
+        join = true;
+    }
+}
+
+void Serializer::ProcessDirectiveAddAnimation(Truck::Animation & anim)
+{
+    m_stream << "\n\tadd_animation " 
+        << setw(m_float_width) << anim.ratio       << ", "
+        << setw(m_float_width) << anim.lower_limit << ", "
+        << setw(m_float_width) << anim.upper_limit << ", "
+        << "source: ";
             
     // Source flags
     bool join = false;
-    unsigned int src_flags = anim.source;
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_AIRSPEED         , "airspeed");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_VERTICAL_VELOCITY, "vvi");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ALTIMETER_100K   , "altimeter100k");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ALTIMETER_10K    , "altimeter10k");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ALTIMETER_1K     , "altimeter1k");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ANGLE_OF_ATTACK  , "aoa");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_FLAP             , "flap");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_AIR_BRAKE        , "airbrake");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ROLL             , "roll");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_PITCH            , "pitch");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_BRAKES           , "brakes");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ACCEL            , "accel");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_CLUTCH           , "clutch");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_SPEEDO           , "speedo");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_TACHO            , "tacho");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_TURBO            , "turbo");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_PARKING          , "parking");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_SHIFT_LEFT_RIGHT , "shifterman1");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_SHIFT_BACK_FORTH , "shifterman2");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_SEQUENTIAL_SHIFT , "sequential");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_SHIFTERLIN       , "shifterlin");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_TORQUE           , "torque");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_HEADING          , "heading");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_DIFFLOCK         , "difflock");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_BOAT_RUDDER      , "rudderboat");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_BOAT_THROTTLE    , "throttleboat");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_STEERING_WHEEL   , "steeringwheel");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_AILERON          , "aileron");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_ELEVATOR         , "elevator");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_AIR_RUDDER       , "rudderair");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_PERMANENT        , "permanent");
-    PROP_ANIMATION_ADD_FLAG(src_flags, join, SOURCE_EVENT            , "event");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_AIRSPEED         , "airspeed");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_VERTICAL_VELOCITY, "vvi");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ALTIMETER_100K   , "altimeter100k");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ALTIMETER_10K    , "altimeter10k");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ALTIMETER_1K     , "altimeter1k");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ANGLE_OF_ATTACK  , "aoa");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_FLAP             , "flap");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_AIR_BRAKE        , "airbrake");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ROLL             , "roll");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_PITCH            , "pitch");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_BRAKES           , "brakes");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ACCEL            , "accel");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_CLUTCH           , "clutch");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_SPEEDO           , "speedo");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_TACHO            , "tacho");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_TURBO            , "turbo");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_PARKING          , "parking");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_SHIFT_LEFT_RIGHT , "shifterman1");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_SHIFT_BACK_FORTH , "shifterman2");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_SEQUENTIAL_SHIFT , "sequential");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_SHIFTERLIN       , "shifterlin");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_TORQUE           , "torque");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_HEADING          , "heading");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_DIFFLOCK         , "difflock");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_BOAT_RUDDER      , "rudderboat");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_BOAT_THROTTLE    , "throttleboat");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_STEERING_WHEEL   , "steeringwheel");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_AILERON          , "aileron");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_ELEVATOR         , "elevator");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_AIR_RUDDER       , "rudderair");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_PERMANENT        , "permanent");
+    PropAnimFlag(m_stream, anim.source, join, Animation::SOURCE_EVENT            , "event");
             
     m_stream << ", mode: ";
     join = false;
-    unsigned int mode_flags = anim.mode;
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_ROTATION_X  , "x-rotation");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_ROTATION_Y  , "y-rotation");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_ROTATION_Z  , "z-rotation");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_OFFSET_X    , "x-offset");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_OFFSET_Y    , "y-offset");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_OFFSET_Z    , "z-offset");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_AUTO_ANIMATE, "autoanimate");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_NO_FLIP     , "noflip");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_BOUNCE      , "bounce");
-    PROP_ANIMATION_ADD_FLAG(mode_flags, join, MODE_EVENT_LOCK  , "eventlock");
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_ROTATION_X  , "x-rotation");
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_ROTATION_Y  , "y-rotation");
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_ROTATION_Z  , "z-rotation");
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_OFFSET_X    , "x-offset");
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_OFFSET_Y    , "y-offset");
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_OFFSET_Z    , "z-offset");
+
+    // Solo flags
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_AUTO_ANIMATE, " autoanimate", ',');
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_NO_FLIP     , " noflip"     , ',');
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_BOUNCE      , " bounce"     , ',');
+    PropAnimFlag(m_stream, anim.mode, join, Animation::MODE_EVENT_LOCK  , " eventlock"  , ',');
             
     if (anim.HasSource_Event())
     {
@@ -632,7 +677,7 @@ void Serializer::ProcessDirectiveAddAnimation(RigDef::Animation & anim)
     }
 }
 
-void Serializer::ProcessFlexbodies(File::Module* module)
+void Serializer::ProcessFlexbodies(Module* module)
 {
     if (module->flexbodies.empty())
     {
@@ -642,18 +687,18 @@ void Serializer::ProcessFlexbodies(File::Module* module)
     auto end_itor = module->flexbodies.end();
     for (auto itor = module->flexbodies.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Flexbody* def = itor->get();
+        Truck::Flexbody* def = *itor;
 
         // Prop-like line
-        m_stream << "\n\t" << def->reference_node.ToString()
-            << ", " << def->x_axis_node.ToString()
-            << ", " << def->y_axis_node.ToString()
-            << ", " << def->offset.x
-            << ", " << def->offset.y
-            << ", " << def->offset.z
-            << ", " << def->rotation.x 
-            << ", " << def->rotation.y
-            << ", " << def->rotation.z
+        m_stream << "\n\t" << setw(m_node_id_width) << def->reference_node.Str()
+            << ", " << setw(m_node_id_width) << def->x_axis_node.Str()
+            << ", " << setw(m_node_id_width) << def->y_axis_node.Str()
+            << ", " << setw(m_float_width) << def->offset.x
+            << ", " << setw(m_float_width) << def->offset.y
+            << ", " << setw(m_float_width) << def->offset.z
+            << ", " << setw(m_float_width) << def->rotation.x 
+            << ", " << setw(m_float_width) << def->rotation.y
+            << ", " << setw(m_float_width) << def->rotation.z
             << ", " << def->mesh_name;
 
         // Forset line
@@ -667,7 +712,7 @@ void Serializer::ProcessFlexbodies(File::Module* module)
             {
                 m_stream << ", ";
             }
-            m_stream << forset_itor->ToString();
+            m_stream << forset_itor->Str();
             first = false;
         }
 
@@ -681,7 +726,7 @@ void Serializer::ProcessFlexbodies(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessPropsAndAnimations(File::Module* module)
+void Serializer::ProcessPropsAndAnimations(Module* module)
 {
     if (module->props.empty())
     {
@@ -691,40 +736,39 @@ void Serializer::ProcessPropsAndAnimations(File::Module* module)
     auto end_itor = module->props.end();
     for (auto itor = module->props.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Prop & def = *itor;
+        Truck::Prop & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.x_axis_node.ToString()
-            << ", " << def.y_axis_node.ToString()
-            << ", " << def.offset.x
-            << ", " << def.offset.y
-            << ", " << def.offset.z
-            << ", " << def.rotation.x 
-            << ", " << def.rotation.y
-            << ", " << def.rotation.z
-            << ", ";
-        if (def.special == Prop::SPECIAL_INVALID)
-        {
-            m_stream << def.mesh_name;
-            continue;
-        }
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.x_axis_node.Str()
+            << ", " << setw(m_node_id_width) << def.y_axis_node.Str()
+            << ", " << setw(m_float_width) << def.offset.x
+            << ", " << setw(m_float_width) << def.offset.y
+            << ", " << setw(m_float_width) << def.offset.z
+            << ", " << setw(m_float_width) << def.rotation.x 
+            << ", " << setw(m_float_width) << def.rotation.y
+            << ", " << setw(m_float_width) << def.rotation.z
+            << ", " << def.mesh_name;
 
         // Special props
         if (def.special == Prop::SPECIAL_BEACON)
         {
-            m_stream << def.mesh_name 
-                << " " << def.special_prop_beacon.flare_material_name
-                << " " << def.special_prop_beacon.color.r
+            m_stream
+                << ", " << def.special_prop_beacon.flare_material_name
+                << ", " << def.special_prop_beacon.color.r
                 << ", " << def.special_prop_beacon.color.g
                 << ", " << def.special_prop_beacon.color.b;
         }
         else if (def.special == Prop::SPECIAL_DASHBOARD_LEFT || def.special == Prop::SPECIAL_DASHBOARD_RIGHT)
         {
-            m_stream << " " << def.special_prop_dashboard.mesh_name
-                << " " << def.special_prop_dashboard.offset.x
-                << ", " << def.special_prop_dashboard.offset.y
-                << ", " << def.special_prop_dashboard.offset.z
-                << ", " << def.special_prop_dashboard.rotation_angle;
+            m_stream << ", " << def.special_prop_dashboard.mesh_name; // The steering wheel mesh
+            if (def.special_prop_dashboard._offset_is_set)
+            {
+                m_stream
+                    << ", " << def.special_prop_dashboard.offset.x
+                    << ", " << def.special_prop_dashboard.offset.y
+                    << ", " << def.special_prop_dashboard.offset.z
+                    << ", " << def.special_prop_dashboard.rotation_angle;
+            }
         }
 
         // Animations
@@ -737,7 +781,7 @@ void Serializer::ProcessPropsAndAnimations(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessMaterialFlareBindings(File::Module* module)
+void Serializer::ProcessMaterialFlareBindings(Module* module)
 {
     if (module->material_flare_bindings.empty())
     {
@@ -747,13 +791,13 @@ void Serializer::ProcessMaterialFlareBindings(File::Module* module)
     auto end_itor = module->material_flare_bindings.end();
     for (auto itor = module->material_flare_bindings.begin(); itor != end_itor; ++itor)
     {
-        RigDef::MaterialFlareBinding & def = *itor;
+        Truck::MaterialFlareBinding & def = *itor;
         m_stream << "\n\t" << def.flare_number << ", " << def.material_name;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessFlares2(File::Module* module)
+void Serializer::ProcessFlares2(Module* module)
 {
     if (module->flares_2.empty())
     {
@@ -763,77 +807,79 @@ void Serializer::ProcessFlares2(File::Module* module)
     auto end_itor = module->flares_2.end();
     for (auto itor = module->flares_2.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Flare2 & def = *itor;
+        Truck::Flare2 & def = *itor;
 
-        m_stream << "\n\t" << def.reference_node.ToString()
-            << ", " << def.node_axis_x.ToString()
-            << ", " << def.node_axis_y.ToString()
-            << ", " << def.offset.x
-            << ", " << def.offset.y
-            << ", " << def.type
-            << ", " << def.control_number
-            << ", " << def.blink_delay_milis
-            << ", " << def.size
-            << " " << def.material_name;
+        m_stream << "\n\t" << setw(m_node_id_width) << def.reference_node.Str()
+            << ", " << setw(m_node_id_width) << def.node_axis_x.Str()
+            << ", " << setw(m_node_id_width) << def.node_axis_y.Str()
+            << ", " << setw(m_float_width) << def.offset.x
+            << ", " << setw(m_float_width) << def.offset.y
+            << ", " << setw(m_float_width) << def.offset.z
+            << ", " << (char)def.type
+            << ", " << setw(2) << def.control_number
+            << ", " << setw(4) << def.blink_delay_milis
+            << ", " << setw(m_float_width) << def.size
+            << ", " << def.material_name;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessManagedMaterialsAndOptions(File::Module* module)
+void Serializer::ProcessManagedMaterialsAndOptions(Module* module)
 {
     if (module->managed_materials.empty())
     {
         return;
     }
-    m_stream << "managedmaterials" << endl;
+
+    // Calc column widths
+    size_t name_w = 0, type_w = 0, tex1_w = 0, tex2_w = 1, tex3_w = 1; // Handle space for '-' empty tex marker
+    for (ManagedMaterial& mm: module->managed_materials)
+    {
+        name_w = std::max(name_w, mm.name.length());
+        type_w = std::max(type_w, strlen(Truck::ManagedMaterial::TypeToStr(mm.type)));
+        tex1_w = std::max(tex1_w, mm.diffuse_map.size());
+        tex2_w = std::max(tex2_w, mm.damaged_diffuse_map.length());
+        tex3_w = std::max(tex3_w, mm.specular_map.length());
+    }
+
+    m_stream << "managedmaterials" << std::left << endl; // Set left alignment. WARNING - PERSISTENT!
     auto end_itor = module->managed_materials.end();
     bool first = true;
-    ManagedMaterialsOptions mm_options;
+    ManagedMatOptions mm_options;
     for (auto itor = module->managed_materials.begin(); itor != end_itor; ++itor)
     {
-        RigDef::ManagedMaterial & def = *itor;
+        Truck::ManagedMaterial & def = *itor;
 
         if (first || (mm_options.double_sided != def.options.double_sided))
         {
             mm_options.double_sided = def.options.double_sided;
             m_stream << "\n\tset_managedmaterials_options " << (int) mm_options.double_sided;
         }
-        // Name
-        m_stream << "\n\t" << def.name << " ";
-        // Type
-        switch (def.type)
-        {
-        case ManagedMaterial::TYPE_FLEXMESH_STANDARD:
-            m_stream << "flexmesh_standard ";
-            break;
-        case ManagedMaterial::TYPE_FLEXMESH_TRANSPARENT:
-            m_stream << "flexmesh_transparent ";
-            break;
-        case ManagedMaterial::TYPE_MESH_STANDARD:
-            m_stream << "mesh_standard ";
-            break;
-        case ManagedMaterial::TYPE_MESH_TRANSPARENT:
-            m_stream << "mesh_transparent ";
-            break;
-        default:
-            ;
-        }
-        // Diffuse texture filename
-        m_stream << def.diffuse_map << " ";
-        // Diffuse damage-texture filename
+
+        m_stream << "\n\t"
+                 << setw(name_w) << def.name << " "
+                 << setw(type_w) << Truck::ManagedMaterial::TypeToStr(def.type) << " "
+                 << setw(tex1_w) << def.diffuse_map << " ";
+
+        // Damage diffuse map - empty column if not applicable
         if (def.type == ManagedMaterial::TYPE_FLEXMESH_STANDARD || def.type == ManagedMaterial::TYPE_FLEXMESH_TRANSPARENT)
         {
-            m_stream << (def.damaged_diffuse_map.empty() ? "-" : def.damaged_diffuse_map) << " ";
+            m_stream << setw(tex2_w) << (def.damaged_diffuse_map.empty() ? "-" : def.damaged_diffuse_map) << " ";
         }
-        // Specular texture
-        m_stream << (def.specular_map.empty() ? "-" : def.specular_map);
+        else
+        {
+            m_stream << setw(tex2_w) << "" << " ";
+        }
+        
+        m_stream << setw(tex3_w) << (def.specular_map.empty() ? "-" : def.specular_map);
 
         first = false;
     }
+    m_stream << std::right; // Reset to default alignment
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessCollisionBoxes(File::Module* module)
+void Serializer::ProcessCollisionBoxes(Module* module)
 {
     if (module->collision_boxes.empty())
     {
@@ -843,21 +889,21 @@ void Serializer::ProcessCollisionBoxes(File::Module* module)
     auto end_itor = module->collision_boxes.end();
     for (auto itor = module->collision_boxes.begin(); itor != end_itor; ++itor)
     {
-        RigDef::CollisionBox & def = *itor;
+        Truck::CollisionBox & def = *itor;
 
         auto nodes_end = def.nodes.end();
         auto node_itor = def.nodes.begin();
-        m_stream << node_itor->ToString();
+        m_stream << node_itor->Str();
         ++node_itor;
         for (; node_itor != nodes_end; ++node_itor)
         {
-            m_stream << ", " << node_itor->ToString();
+            m_stream << ", " << node_itor->Str();
         }
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessAxles(File::Module* module)
+void Serializer::ProcessAxles(Module* module)
 {
     if (module->axles.empty())
     {
@@ -867,18 +913,18 @@ void Serializer::ProcessAxles(File::Module* module)
     auto end_itor = module->axles.end();
     for (auto itor = module->axles.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Axle & def = *itor;
+        Truck::Axle & def = *itor;
 
         m_stream << "\n\t"
-            << "w1(" << def.wheels[0][0].ToString() << " " << def.wheels[0][1].ToString() << "), "
-            << "w2(" << def.wheels[1][0].ToString() << " " << def.wheels[1][1].ToString() << ")";
+            << "w1(" << def.wheels[0][0].Str() << " " << def.wheels[0][1].Str() << "), "
+            << "w2(" << def.wheels[1][0].Str() << " " << def.wheels[1][1].Str() << ")";
         if (! def.options.empty())
         {
             m_stream << ", d(";
             auto end = def.options.end();
             for (auto itor = def.options.begin(); itor != end; ++itor)
             {
-                m_stream << *itor;
+                m_stream << (char)*itor;
             }
             m_stream << ")";
         }
@@ -886,7 +932,7 @@ void Serializer::ProcessAxles(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessInterAxles(File::Module* module)
+void Serializer::ProcessInterAxles(Module* module)
 {
     if (module->interaxles.empty())
     {
@@ -896,7 +942,7 @@ void Serializer::ProcessInterAxles(File::Module* module)
     auto end_itor = module->interaxles.end();
     for (auto itor = module->interaxles.begin(); itor != end_itor; ++itor)
     {
-        RigDef::InterAxle & def = *itor;
+        Truck::InterAxle & def = *itor;
 
         m_stream << "\n\t"
             << def.a1 << ", "
@@ -907,7 +953,7 @@ void Serializer::ProcessInterAxles(File::Module* module)
             auto end = def.options.end();
             for (auto itor = def.options.begin(); itor != end; ++itor)
             {
-                m_stream << *itor;
+                m_stream << (char)*itor;
             }
             m_stream << ")";
         }
@@ -915,7 +961,7 @@ void Serializer::ProcessInterAxles(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessTransferCase(File::Module* module)
+void Serializer::ProcessTransferCase(Module* module)
 {
     if (! module->transfer_case)
     {
@@ -933,7 +979,7 @@ void Serializer::ProcessTransferCase(File::Module* module)
         m_stream << endl << endl;
 }
 
-void Serializer::ProcessCruiseControl(File::Module* module)
+void Serializer::ProcessCruiseControl(Module* module)
 {
     if (! module->cruise_control)
     {
@@ -945,7 +991,7 @@ void Serializer::ProcessCruiseControl(File::Module* module)
         << endl << endl;
 }
 
-void Serializer::ProcessSpeedLimiter(File::Module* module)
+void Serializer::ProcessSpeedLimiter(Module* module)
 {
     if (! module->speed_limiter.is_enabled)
     {
@@ -956,7 +1002,7 @@ void Serializer::ProcessSpeedLimiter(File::Module* module)
         << endl << endl;
 }
 
-void Serializer::ProcessTorqueCurve(File::Module* module)
+void Serializer::ProcessTorqueCurve(Module* module)
 {
     if (! module->torque_curve)
     {
@@ -979,7 +1025,7 @@ void Serializer::ProcessTorqueCurve(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessParticles(File::Module* module)
+void Serializer::ProcessParticles(Module* module)
 {
     if (module->particles.empty())
     {
@@ -989,17 +1035,17 @@ void Serializer::ProcessParticles(File::Module* module)
     auto end_itor = module->particles.end();
     for (auto itor = module->particles.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Particle & def = *itor;
+        Truck::Particle & def = *itor;
 
         m_stream << "\n\t" 
-            << setw(m_node_id_width) << def.emitter_node.ToString() << ", "
-            << setw(m_node_id_width) << def.reference_node.ToString() << ", "
+            << setw(m_node_id_width) << def.emitter_node.Str() << ", "
+            << setw(m_node_id_width) << def.reference_node.Str() << ", "
             << def.particle_system_name;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessRopables(File::Module* module)
+void Serializer::ProcessRopables(Module* module)
 {
     if (module->ropables.empty())
     {
@@ -1009,16 +1055,16 @@ void Serializer::ProcessRopables(File::Module* module)
     auto end_itor = module->ropables.end();
     for (auto itor = module->ropables.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Ropable & def = *itor;
+        Truck::Ropable & def = *itor;
 
-        m_stream << "\n\t" << def.node.ToString()
+        m_stream << "\n\t" << setw(m_node_id_width) << def.node.Str()
             << ", " << def.group
             << ", " << (int) def.has_multilock;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessTies(File::Module* module)
+void Serializer::ProcessTies(Module* module)
 {
     if (module->ties.empty())
     {
@@ -1028,9 +1074,9 @@ void Serializer::ProcessTies(File::Module* module)
     auto end_itor = module->ties.end();
     for (auto itor = module->ties.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Tie & def = *itor;
+        Truck::Tie & def = *itor;
 
-        m_stream << "\n\t" << def.root_node.ToString()
+        m_stream << "\n\t" << setw(m_node_id_width) << def.root_node.Str()
             << ", " << setw(m_float_width) << def.max_reach_length
             << ", " << setw(m_float_width) << def.auto_shorten_rate
             << ", " << setw(m_float_width) << def.min_length
@@ -1042,7 +1088,7 @@ void Serializer::ProcessTies(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessFixes(File::Module* module)
+void Serializer::ProcessFixes(Module* module)
 {
     if (module->fixes.empty())
     {
@@ -1052,12 +1098,12 @@ void Serializer::ProcessFixes(File::Module* module)
     auto end_itor = module->fixes.end();
     for (auto itor = module->fixes.begin(); itor != end_itor; ++itor)
     {
-        m_stream << "\n\t" << setw(m_node_id_width) << itor->ToString();
+        m_stream << "\n\t" << setw(m_node_id_width) << itor->Str();
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessRopes(File::Module* module)
+void Serializer::ProcessRopes(Module* module)
 {
     if (module->ropes.empty())
     {
@@ -1069,16 +1115,16 @@ void Serializer::ProcessRopes(File::Module* module)
     BeamDefaults* beam_defaults = nullptr;
     for (auto itor = module->ropes.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Rope & def = *itor;
+        Truck::Rope & def = *itor;
 
         if (first || (def.beam_defaults.get() != beam_defaults))
         {
-            ProcessBeamDefaults(def.beam_defaults.get(), "\t");
+            ProcessBeamDefaults(def.beam_defaults.get());
         }
 
         m_stream << "\n\t" 
-            << setw(m_node_id_width) << def.root_node.ToString() << ", "
-            << setw(m_node_id_width) << def.end_node.ToString();
+            << setw(m_node_id_width) << def.root_node.Str() << ", "
+            << setw(m_node_id_width) << def.end_node.Str();
         if (def.invisible)
         {
             m_stream << ", i";
@@ -1088,7 +1134,7 @@ void Serializer::ProcessRopes(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessRailGroups(File::Module* module)
+void Serializer::ProcessRailGroups(Module* module)
 {
     if (module->railgroups.empty())
     {
@@ -1098,35 +1144,38 @@ void Serializer::ProcessRailGroups(File::Module* module)
     auto end_itor = module->railgroups.end();
     for (auto itor = module->railgroups.begin(); itor != end_itor; ++itor)
     {
-        RigDef::RailGroup & def = *itor;
+        Truck::RailGroup & def = *itor;
 
         m_stream << "\n\t" << def.id;
         auto node_end = def.node_list.end();
         for (auto node_itor = def.node_list.begin(); node_itor != node_end; ++node_itor)
         {
-            m_stream << ", " << node_itor->start.ToString();
+            m_stream << ", " << node_itor->start.Str();
             if (node_itor->IsRange())
             {
-                m_stream << " - " << node_itor->end.ToString();
+                m_stream << " - " << node_itor->end.Str();
             }
         }
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessSlideNodes(File::Module* module)
+void Serializer::ProcessSlideNodes(Module* module)
 {
     if (module->slidenodes.empty())
     {
         return;
     }
     m_stream << "slidenodes" << endl << endl;
+    this->ResetGroup();
     auto end_itor = module->slidenodes.end();
     for (auto itor = module->slidenodes.begin(); itor != end_itor; ++itor)
     {
-        RigDef::SlideNode & def = *itor;
+        Truck::SlideNode & def = *itor;
+        this->UpdateGroup(module, def.editor_group_id);
 
-        m_stream << "\n\t" << def.slide_node.ToString();
+        // Node ID
+        m_stream << "\t" << setw(m_node_id_width) << def.slide_node.Str();
 
         // Define rail - either list of nodes, or raigroup ID
         if (!def.rail_node_ranges.empty())
@@ -1135,10 +1184,10 @@ void Serializer::ProcessSlideNodes(File::Module* module)
             auto itor = def.rail_node_ranges.begin();
             for (; itor != end; ++itor)
             {
-                m_stream << ", " << itor->start.ToString();
+                m_stream << ", " << itor->start.Str();
                 if (itor->IsRange())
                 {
-                    m_stream << " - " << itor->end.ToString();
+                    m_stream << " - " << itor->end.Str();
                 }
             }
         }
@@ -1147,24 +1196,25 @@ void Serializer::ProcessSlideNodes(File::Module* module)
             m_stream << ", g" << def.railgroup_id;
         }
 
-        // Params
-        m_stream
-            << ", s" << def.spring_rate
-            << ", b" << def.break_force
-            << ", t" << def.tolerance
-            << ", r" << def.attachment_rate
-            << ", d" << def.max_attachment_distance;
+        // Optional args
+        if (def._spring_rate_set)      { m_stream << ", s" << def.spring_rate; }
+        if (def._break_force_set)      { m_stream << ", b" << def.break_force; }
+        if (def._tolerance_set)        { m_stream << ", t" << def.tolerance; }
+        if (def._attachment_rate_set)  { m_stream << ", r" << def.attachment_rate; }
+        if (def._max_attach_dist_set)  { m_stream << ", d" << def.max_attach_dist; }
 
         // Constraint flags (cX)
              if (def.HasConstraint_a_AttachAll())     { m_stream << ", ca"; }
         else if (def.HasConstraint_f_AttachForeign()) { m_stream << ", cf"; }
         else if (def.HasConstraint_s_AttachSelf())    { m_stream << ", cs"; }
         else if (def.HasConstraint_n_AttachNone())    { m_stream << ", cn"; }
+
+        m_stream << endl;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessHooks(File::Module* module)
+void Serializer::ProcessHooks(Module* module)
 {
     if (module->hooks.empty())
     {
@@ -1174,9 +1224,9 @@ void Serializer::ProcessHooks(File::Module* module)
     auto end_itor = module->hooks.end();
     for (auto itor = module->hooks.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Hook & def = *itor;
+        Truck::Hook & def = *itor;
 
-        m_stream << "\n\t" << def.node.ToString();
+        m_stream << "\n\t" << setw(m_node_id_width) << def.node.Str();
 
         // Boolean options
         if (def.flag_auto_lock)  { m_stream << ", auto-lock"; }
@@ -1187,18 +1237,18 @@ void Serializer::ProcessHooks(File::Module* module)
 
         // Key-value options
         m_stream 
-            << ", hookrange: " << def.option_hook_range
-            << ", speedcoef: " << def.option_speed_coef
-            << ", maxforce: "  << def.option_max_force
-            << ", hookgroup: " << def.option_hookgroup
-            << ", lockgroup: " << def.option_lockgroup
-            << ", timer: "     << def.option_timer
-            << ", shortlimit: "<< def.option_min_range_meters;
+            << ", hookrange: "  << setw(m_float_width) << def.option_hook_range
+            << ", speedcoef: "  << setw(m_float_width) << def.option_speed_coef
+            << ", maxforce: "   << setw(m_float_width) << def.option_max_force
+            << ", hookgroup: "  << setw(4) << def.option_hookgroup
+            << ", lockgroup: "  << setw(4) << def.option_lockgroup
+            << ", timer: "      << setw(m_float_width) << def.option_timer
+            << ", shortlimit: " << setw(m_float_width) << def.option_min_range_meters;
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessLockgroups(File::Module* module)
+void Serializer::ProcessLockgroups(Module* module)
 {
     if (module->lockgroups.empty())
     {
@@ -1208,19 +1258,19 @@ void Serializer::ProcessLockgroups(File::Module* module)
     auto end_itor = module->lockgroups.end();
     for (auto itor = module->lockgroups.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Lockgroup & def = *itor;
+        Truck::Lockgroup & def = *itor;
 
         m_stream << "\n\t" << def.number;
         auto nodes_end = def.nodes.end();
         for (auto nodes_itor = def.nodes.begin(); nodes_itor != nodes_end; ++nodes_itor)
         {
-            m_stream << ", " << nodes_itor->ToString();
+            m_stream << ", " << nodes_itor->Str();
         }
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessTriggers(File::Module* module)
+void Serializer::ProcessTriggers(Module* module)
 {
     if (module->triggers.empty())
     {
@@ -1230,15 +1280,15 @@ void Serializer::ProcessTriggers(File::Module* module)
     auto end_itor = module->triggers.end();
     for (auto itor = module->triggers.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Trigger & def = *itor;
+        Truck::Trigger & def = *itor;
 
         m_stream << "\n\t"
-            << def.nodes[0].ToString()       << ", "
-            << def.nodes[1].ToString()       << ", "
-            << def.contraction_trigger_limit << ", "
-            << def.expansion_trigger_limit   << ", "
-            << def.shortbound_trigger_action << ", "
-            << def.longbound_trigger_action  << ", ";
+            << setw(m_node_id_width) << def.nodes[0].Str()       << ", "
+            << setw(m_node_id_width) << def.nodes[1].Str()       << ", "
+            << setw(m_float_width) << def.contraction_trigger_limit << ", "
+            << setw(m_float_width) << def.expansion_trigger_limit   << ", "
+            << setw(4) << def.shortbound_trigger_action << ", "
+            << setw(4) << def.longbound_trigger_action  << ", ";
 
         if (def.HasFlag_i_Invisible()          ) { m_stream << "i"; }
         if (def.HasFlag_c_CommandStyle()       ) { m_stream << "c"; }
@@ -1259,26 +1309,26 @@ void Serializer::ProcessTriggers(File::Module* module)
 
 #define ANIMATOR_ADD_FLAG(DEF_VAR, AND_VAR, BITMASK_CONST, NAME_STR) \
     if (AND_VAR) { m_stream << " | "; } \
-    if (BITMASK_IS_1((DEF_VAR).flags, RigDef::Animator::BITMASK_CONST)) { \
+    if (BITMASK_IS_1((DEF_VAR).flags, Truck::Animator::BITMASK_CONST)) { \
         AND_VAR = true; \
         m_stream << NAME_STR; \
     }
 
 #define ANIMATOR_ADD_AERIAL_FLAG(DEF_VAR, AND_VAR, BITMASK_CONST, NAME_STR) \
     if (AND_VAR) { m_stream << " | "; } \
-    if (BITMASK_IS_1((DEF_VAR).aero_animator.flags, RigDef::AeroAnimator::BITMASK_CONST)) { \
+    if (BITMASK_IS_1((DEF_VAR).aero_animator.flags, Truck::AeroAnimator::BITMASK_CONST)) { \
         AND_VAR = true; \
-        m_stream << NAME_STR << DEF_VAR.aero_animator.motor; \
+        m_stream << NAME_STR << DEF_VAR.aero_animator.engine_idx + 1; \
     }
 
 #define ANIMATOR_ADD_LIMIT(DEF_VAR, AND_VAR, BITMASK_CONST, NAME_STR, VALUE) \
     if (AND_VAR) { m_stream << " | "; } \
-    if (BITMASK_IS_1((DEF_VAR).aero_animator.flags, RigDef::Animator::BITMASK_CONST)) { \
+    if (BITMASK_IS_1((DEF_VAR).aero_animator.flags, Truck::Animator::BITMASK_CONST)) { \
         AND_VAR = true; \
         m_stream << NAME_STR << ": " << VALUE; \
     }
 
-void Serializer::ProcessAnimators(File::Module* module)
+void Serializer::ProcessAnimators(Module* module)
 {
     if (module->animators.empty())
     {
@@ -1288,12 +1338,12 @@ void Serializer::ProcessAnimators(File::Module* module)
     auto end_itor = module->animators.end();
     for (auto itor = module->animators.begin(); itor != end_itor; ++itor)
     {
-        RigDef::Animator & def = *itor;
+        Truck::Animator & def = *itor;
 
         m_stream << "\t"
-            << def.nodes[0].ToString() << ", "
-            << def.nodes[1].ToString() << ", "
-            << def.lenghtening_factor << ", ";
+            << setw(m_node_id_width) << def.nodes[0].Str() << ", "
+            << setw(m_node_id_width) << def.nodes[1].Str() << ", "
+            << setw(m_float_width) << def.lenghtening_factor << ", ";
 
         // Options
         bool bAnd = false;
@@ -1339,21 +1389,23 @@ void Serializer::ProcessAnimators(File::Module* module)
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessContacters(File::Module* module)
+void Serializer::ProcessContacters(Module* module)
 {
     if (module->contacters.empty())
     {
         return;
     }
     m_stream << "contacters" << endl << endl;
-    auto end_itor = module->rotators.end();
-    for (auto itor = module->rotators.begin(); itor != end_itor; ++itor)
+
+    for (Truck::Node::Ref& node: module->contacters)
     {
+        m_stream << setw(m_node_id_width) << node.Str() << endl;
     }
+
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessRotators(File::Module* module)
+void Serializer::ProcessRotators(Module* module)
 {
     if (module->rotators.empty())
     {
@@ -1367,110 +1419,127 @@ void Serializer::ProcessRotators(File::Module* module)
 
         // Axis nodes
         m_stream
-            << def.axis_nodes[0].ToString() << ", "
-            << def.axis_nodes[1].ToString() << ", ";
+             << setw(m_node_id_width) << def.axis_nodes[0].Str() << ", "
+             << setw(m_node_id_width) << def.axis_nodes[1].Str() << ", ";
 
         // Baseplate nodes
         for (int i = 0; i < 4; ++i)
         {
-            m_stream << def.base_plate_nodes[i].ToString() << ", ";
+            m_stream << setw(m_node_id_width) << def.base_plate_nodes[i].Str() << ", ";
         }
 
         // Rotating plate nodes
         for (int i = 0; i < 4; ++i)
         {
-            m_stream << def.rotating_plate_nodes[i].ToString() << ", ";
+            m_stream << setw(m_node_id_width) << def.rotating_plate_nodes[i].Str() << ", ";
         }
         
         // Attributes
-        m_stream << def.rate << ", " << def.spin_left_key << ", " << def.spin_right_key << ", ";
+        m_stream << setw(m_float_width) << def.rate << ", "
+                 << setw(4) << def.spin_left_key << ", "
+                 << setw(4) << def.spin_right_key << ", ";
 
         // Inertia
         m_stream 
-            << def.inertia.start_delay_factor << ", "
-            << def.inertia.stop_delay_factor  << ", "
-            << def.inertia.start_function	  << ", "
-            << def.inertia.stop_function	  << ", "
+            << setw(m_float_width) << def.inertia.start_delay_factor << ", "
+            << setw(m_float_width) << def.inertia.stop_delay_factor  << ", "
+            << def.inertia.start_function     << ", "
+            << def.inertia.stop_function      << ", "
             << def.engine_coupling            << ", "
             << (def.needs_engine ? "true" : "false");
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessRotators2(File::Module* module)
+void Serializer::ProcessRotators2(Module* module)
 {
     if (module->rotators_2.empty())
     {
         return;
     }
-    m_stream << "rotators2" << endl << endl;
-    auto end_itor = module->rotators_2.end();
-    for (auto itor = module->rotators_2.begin(); itor != end_itor; ++itor)
-    {
-        Rotator2 & def = *itor;
 
+    // Calc column widths
+    size_t desc_w = 0, startf_w = 0, stopf_w = 0;
+    for (Truck::Rotator2& def: module->rotators_2)
+    {
+        desc_w   = std::max(desc_w,   def.description.length());
+        startf_w = std::max(startf_w, def.inertia.start_function.length());
+        stopf_w  = std::max(stopf_w,  def.inertia.stop_function.length());
+    }
+
+    // Write data
+    m_stream << "rotators2" << endl << endl;
+    for (Truck::Rotator2& def: module->rotators_2)
+    {
         // Axis nodes
         m_stream
-            << def.axis_nodes[0].ToString() << ", "
-            << def.axis_nodes[1].ToString() << ", ";
+             << setw(m_node_id_width)<< def.axis_nodes[0].Str() << ", "
+             << setw(m_node_id_width)<< def.axis_nodes[1].Str() << ", ";
 
         // Baseplate nodes
         for (int i = 0; i < 4; ++i)
         {
-            m_stream << def.base_plate_nodes[i].ToString() << ", ";
+            m_stream << setw(m_node_id_width) << def.base_plate_nodes[i].Str() << ", ";
         }
 
         // Rotating plate nodes
         for (int i = 0; i < 4; ++i)
         {
-            m_stream << def.rotating_plate_nodes[i].ToString() << ", ";
+            m_stream << setw(m_node_id_width) << def.rotating_plate_nodes[i].Str() << ", ";
         }
         
         // Attributes
         m_stream 
-            << def.rate            << ", " 
+            << setw(m_float_width) << def.rate << ", " 
             << def.spin_left_key   << ", " 
             << def.spin_right_key  << ", "
-            << def.rotating_force  << ", "
-            << def.tolerance	   << ", "
-            << def.description	   << ", ";
+            << setw(m_float_width) << def.rotating_force << ", "
+            << setw(m_float_width) << def.tolerance << ", "
+            << setw(desc_w) << def.description << ", ";
 
         // Inertia
         m_stream 
-            << def.inertia.start_delay_factor << ", "
-            << def.inertia.stop_delay_factor  << ", "
-            << def.inertia.start_function	  << ", "
-            << def.inertia.stop_function	  << ", "
-            << def.engine_coupling            << ", "
+            << setw(m_float_width) << def.inertia.start_delay_factor << ", "
+            << setw(m_float_width) << def.inertia.stop_delay_factor  << ", "
+            << setw(startf_w)      << def.inertia.start_function  << ", "
+            << setw(stopf_w)       << def.inertia.stop_function  << ", "
+            << setw(m_float_width) << def.engine_coupling        << ", "
             << (def.needs_engine ? "true" : "false");
     }
     m_stream << endl << endl; // Empty line
 }
 
-void Serializer::ProcessFlexBodyWheels(File::Module* module)
+void Serializer::ProcessFlexBodyWheels(Module* module)
 {
     if (module->flex_body_wheels.empty())
     {
         return;
     }
+
+    this->ResetPresets();
+
     m_stream << "flexbodywheels" << endl << endl;
     auto end_itor = module->flex_body_wheels.end();
     for (auto itor = module->flex_body_wheels.begin(); itor != end_itor; ++itor)
     {
+        this->UpdatePresets(itor->beam_defaults.get(), itor->node_defaults.get(), nullptr);
+
         m_stream << "\t"
             << setw(m_float_width)   << itor->tyre_radius                   << ", "
             << setw(m_float_width)   << itor->rim_radius                    << ", "
             << setw(m_float_width)   << itor->width                         << ", "
             << setw(3)               << itor->num_rays                      << ", "
-            << setw(m_node_id_width) << itor->nodes[0].ToString()           << ", "
-            << setw(m_node_id_width) << itor->nodes[1].ToString()           << ", "
-            << setw(m_node_id_width) << itor->rigidity_node.ToString()      << ", "
+            << setw(m_node_id_width) << itor->nodes[0].Str()           << ", "
+            << setw(m_node_id_width) << itor->nodes[1].Str()           << ", "
+            << setw(m_node_id_width) << RigidityNodeToStr(itor->rigidity_node) << ", "
             << setw(3)               << itor->braking                       << ", "
             << setw(3)               << itor->propulsion                    << ", "
-            << setw(m_node_id_width) << itor->reference_arm_node.ToString() << ", "
+            << setw(m_node_id_width) << itor->reference_arm_node.Str() << ", "
             << setw(m_float_width)   << itor->mass                          << ", "
             << setw(m_float_width)   << itor->tyre_springiness              << ", "
             << setw(m_float_width)   << itor->tyre_damping                  << ", "
+            << setw(m_float_width)   << itor->rim_springiness               << ", "
+            << setw(m_float_width)   << itor->rim_damping                   << ", "
                                      << (static_cast<char>(itor->side))     << ", "
                                      << itor->rim_mesh_name                 << " " // Separator = space!
                                      << itor->tyre_mesh_name
@@ -1480,59 +1549,81 @@ void Serializer::ProcessFlexBodyWheels(File::Module* module)
     m_stream << endl; // Empty line
 }
 
-void Serializer::ProcessSlopeBrake(File::Module* module)
+void Serializer::ProcessSlopeBrake(Module* module)
 {
-    if (module->slope_brake)
+    if (! module->slope_brake)
     {
-        m_stream << "SlopeBrake "
-            << module->slope_brake->regulating_force << ", "
-            << module->slope_brake->attach_angle << ", "
-            << module->slope_brake->release_angle 
-            << endl << endl;
+        return;
     }
+
+    m_stream << "SlopeBrake "
+        << setw(m_float_width) << module->slope_brake->regulating_force << ", "
+        << setw(m_float_width) << module->slope_brake->attach_angle << ", "
+        << setw(m_float_width) << module->slope_brake->release_angle;
+
+    m_stream << endl << endl;  // Empty line
 }
 
-void Serializer::ProcessTractionControl(File::Module* module)
+void Serializer::ProcessTractionControl(Module* module)
 {
-    if (module->traction_control == nullptr) { return; }
+    if (! module->traction_control) 
+    {
+        return;
+    }
 
-    RigDef::TractionControl* tc = module->traction_control.get();
+    Truck::TractionControl* tc = module->traction_control.get();
 
     m_stream << "TractionControl "
-        << tc->regulation_force << ", "
-        << tc->wheel_slip << ", "
-        << tc->fade_speed << ", "
-        << tc->pulse_per_sec << ", mode: " << (tc->attr_is_on ? "ON" : "OFF");
+        << setw(m_float_width) << tc->regulation_force << ", "
+        << setw(m_float_width) << tc->wheel_slip << ", "
+        << setw(m_float_width) << tc->fade_speed << ", "
+        << setw(m_float_width) << tc->pulse_per_sec << ", "
+        << "mode: " << (tc->attr_is_on ? "ON" : "OFF");
     // Modes
     if (tc->attr_no_dashboard) { m_stream << " & NODASH ";   }
     if (tc->attr_no_toggle)    { m_stream << " & NOTOGGLE "; }
+
+    m_stream << endl << endl;  // Empty line
 }
 
-void Serializer::ProcessBrakes(File::Module* module)
+void Serializer::ProcessBrakes(Module* module)
 {
+    if (! module->brakes)
+    {
+        return;
+    }
+
     m_stream << "brakes\n\t" 
-        << module->brakes->default_braking_force << ", "
-        << module->brakes->parking_brake_force;
+        << setw(m_float_width) << module->brakes->default_braking_force << ", "
+        << setw(m_float_width) << module->brakes->parking_brake_force;
+
+    m_stream << endl << endl;  // Empty line
 }
 
-void Serializer::ProcessAntiLockBrakes(File::Module* module)
+void Serializer::ProcessAntiLockBrakes(Module* module)
 {
-    if (module->anti_lock_brakes == nullptr) { return; }
+    if (! module->anti_lock_brakes) 
+    {
+        return;
+    }
 
-    RigDef::AntiLockBrakes* alb = module->anti_lock_brakes.get();
+    Truck::AntiLockBrakes* alb = module->anti_lock_brakes.get();
 
     m_stream << "AntiLockBrakes "
-        << alb->regulation_force << ", "
-        << alb->min_speed << ", "
-        << alb->pulse_per_sec << ", mode: " << (alb->attr_is_on ? "ON" : "OFF");
+        << setw(m_float_width) << alb->regulation_force << ", "
+        << setw(m_float_width) << alb->min_speed << ", "
+        << setw(m_float_width) << alb->pulse_per_sec << ", "
+        << "mode: " << (alb->attr_is_on ? "ON" : "OFF");
     // Modes
     if (alb->attr_no_dashboard) { m_stream << " & NODASH ";   }
     if (alb->attr_no_toggle)    { m_stream << " & NOTOGGLE "; }
+
+    m_stream << endl << endl;  // Empty line
 }
 
-void Serializer::ProcessEngine(File::Module* module)
+void Serializer::ProcessEngine(Module* module)
 {
-    if (module->engine.get() == nullptr)
+    if (! module->engine)
     {
         return;
     }
@@ -1553,7 +1644,7 @@ void Serializer::ProcessEngine(File::Module* module)
         << setw(11)   << module->engine->reverse_gear_ratio            << ", "
         << setw(11)   << module->engine->neutral_gear_ratio;
     
-    auto itor = module->engine->gear_ratios.begin();	
+    auto itor = module->engine->gear_ratios.begin();
     auto end  = module->engine->gear_ratios.end();
     for (; itor != end; ++itor)
     {
@@ -1562,9 +1653,9 @@ void Serializer::ProcessEngine(File::Module* module)
     m_stream << ", -1.0" /*terminator*/ << endl << endl;
 }
 
-void Serializer::ProcessEngoption(File::Module* module)
+void Serializer::ProcessEngoption(Module* module)
 {
-    if (module->engoption.get() == nullptr)
+    if (! module->engoption)
     {
         return;
     }
@@ -1595,10 +1686,10 @@ void Serializer::ProcessEngoption(File::Module* module)
         << setw(14)   << module->engoption->min_idle_mixture  << ", "
         << setw(15)   << module->engoption->braking_torque;
     
-    m_stream << endl << endl;
+    m_stream << endl << endl;  // Empty line
 }
 
-void Serializer::ProcessHelp(File::Module* module)
+void Serializer::ProcessHelp(Module* module)
 {
     if (module->help_panel_material_name.empty())
     {
@@ -1607,27 +1698,31 @@ void Serializer::ProcessHelp(File::Module* module)
     m_stream << "help\n\t" << module->help_panel_material_name << endl << endl;
 }
 
-void Serializer::ProcessWheels2(File::Module* module)
+void Serializer::ProcessWheels2(Module* module)
 {
     if (module->wheels_2.empty())
     {
         return;
     }
+
+    this->ResetPresets();
     m_stream << "wheels2" << endl << endl;
     auto end_itor = module->wheels_2.end();
     for (auto itor = module->wheels_2.begin(); itor != end_itor; ++itor)
     {
+        this->UpdatePresets(itor->beam_defaults.get(), itor->node_defaults.get(), nullptr);
+
         m_stream << "\t"
             << setw(m_float_width)   << itor->tyre_radius                   << ", "
             << setw(m_float_width)   << itor->rim_radius                    << ", "
             << setw(m_float_width)   << itor->width                         << ", "
             << setw(3)               << itor->num_rays                      << ", "
-            << setw(m_node_id_width) << itor->nodes[0].ToString()           << ", "
-            << setw(m_node_id_width) << itor->nodes[1].ToString()           << ", "
-            << setw(m_node_id_width) << itor->rigidity_node.ToString()      << ", "
+            << setw(m_node_id_width) << itor->nodes[0].Str()           << ", "
+            << setw(m_node_id_width) << itor->nodes[1].Str()           << ", "
+            << setw(m_node_id_width) << RigidityNodeToStr(itor->rigidity_node) << ", "
             << setw(3)               << itor->braking                       << ", "
             << setw(3)               << itor->propulsion                    << ", "
-            << setw(m_node_id_width) << itor->reference_arm_node.ToString() << ", "
+            << setw(m_node_id_width) << itor->reference_arm_node.Str() << ", "
             << setw(m_float_width)   << itor->mass                          << ", "
             << setw(m_float_width)   << itor->rim_springiness               << ", "
             << setw(m_float_width)   << itor->rim_damping                   << ", "
@@ -1642,26 +1737,30 @@ void Serializer::ProcessWheels2(File::Module* module)
     m_stream << endl; // Empty line
 }
 
-void Serializer::ProcessWheels(File::Module* module)
+void Serializer::ProcessWheels(Module* module)
 {
     if (module->wheels.empty())
     {
         return;
     }
+
+    this->ResetPresets();
     m_stream << "wheels" << endl << endl;
     auto end_itor = module->wheels.end();
     for (auto itor = module->wheels.begin(); itor != end_itor; ++itor)
     {
+        this->UpdatePresets(itor->beam_defaults.get(), itor->node_defaults.get(), nullptr);
+
         m_stream << "\t"
             << setw(m_float_width)   << itor->radius                        << ", "
             << setw(m_float_width)   << itor->width                         << ", "
             << setw(3)               << itor->num_rays                      << ", "
-            << setw(m_node_id_width) << itor->nodes[0].ToString()           << ", "
-            << setw(m_node_id_width) << itor->nodes[1].ToString()           << ", "
-            << setw(m_node_id_width) << itor->rigidity_node.ToString()      << ", "
+            << setw(m_node_id_width) << itor->nodes[0].Str()                << ", "
+            << setw(m_node_id_width) << itor->nodes[1].Str()                << ", "
+            << setw(m_node_id_width) << RigidityNodeToStr(itor->rigidity_node) << ", "
             << setw(3)               << itor->braking                       << ", "
             << setw(3)               << itor->propulsion                    << ", "
-            << setw(m_node_id_width) << itor->reference_arm_node.ToString() << ", "
+            << setw(m_node_id_width) << itor->reference_arm_node.Str()      << ", "
             << setw(m_float_width)   << itor->mass                          << ", "
             << setw(m_float_width)   << itor->springiness                   << ", "
             << setw(m_float_width)   << itor->damping                       << ", "
@@ -1674,27 +1773,38 @@ void Serializer::ProcessWheels(File::Module* module)
     m_stream << endl; // Empty line
 }
 
-void Serializer::ProcessMeshWheels(File::Module* module)
+void Serializer::ProcessMeshWheels(Module* module)
 {
-    if (module->mesh_wheels.empty()) { return; }
+    if (module->mesh_wheels.empty())
+    {
+        return;
+    }
 
     for (int i = 1; i <= 2; ++i)
     {
+        this->ResetPresets();
         m_stream << "meshwheels" << ((i == 2) ? "2" : "") << "\n\n";
         auto end_itor = module->mesh_wheels.end();
         for (auto itor = module->mesh_wheels.begin(); itor != end_itor; ++itor)
         {
+            if (itor->_is_meshwheel2 != (i == 2))
+            {
+                continue;
+            }
+
+            this->UpdatePresets(itor->beam_defaults.get(), itor->node_defaults.get(), nullptr);
+
             m_stream << "\t"
             << setw(m_float_width)   << itor->tyre_radius                   << ", "
             << setw(m_float_width)   << itor->rim_radius                    << ", "
             << setw(m_float_width)   << itor->width                         << ", "
             << setw(3)               << itor->num_rays                      << ", "
-            << setw(m_node_id_width) << itor->nodes[0].ToString()           << ", "
-            << setw(m_node_id_width) << itor->nodes[1].ToString()           << ", "
-            << setw(m_node_id_width) << itor->rigidity_node.ToString()      << ", "
+            << setw(m_node_id_width) << itor->nodes[0].Str()           << ", "
+            << setw(m_node_id_width) << itor->nodes[1].Str()           << ", "
+            << setw(m_node_id_width) << RigidityNodeToStr(itor->rigidity_node) << ", "
             << setw(3)               << itor->braking                       << ", "
             << setw(3)               << itor->propulsion                    << ", "
-            << setw(m_node_id_width) << itor->reference_arm_node.ToString() << ", "
+            << setw(m_node_id_width) << itor->reference_arm_node.Str() << ", "
             << setw(m_float_width)   << itor->mass                          << ", "
             << setw(m_float_width)   << itor->spring                        << ", "
             << setw(m_float_width)   << itor->damping                       << ", "
@@ -1708,7 +1818,25 @@ void Serializer::ProcessMeshWheels(File::Module* module)
     m_stream << endl; // Empty line
 }
 
-void Serializer::ProcessCinecam(File::Module* module)
+void Serializer::ProcessCameras(Module* module)
+{
+    if (module->cameras.empty())
+    {
+        return;
+    }
+
+    m_stream << "cameras\n\n";
+    for (auto& camera: module->cameras)
+    {
+        m_stream
+            << setw(m_node_id_width) << camera.center_node.Str() << ", "
+            << setw(m_node_id_width) << camera.back_node.Str()   << ", "
+            << setw(m_node_id_width) << camera.left_node.Str()   << "\n";
+    }
+    m_stream << "\n";
+}
+
+void Serializer::ProcessCinecam(Module* module)
 {
     if (module->cinecam.empty())
     {
@@ -1724,28 +1852,30 @@ void Serializer::ProcessCinecam(File::Module* module)
             << setw(m_float_width) << itor->position.y << ", "
             << setw(m_float_width) << itor->position.z << ", ";
         m_stream
-            << setw(m_node_id_width) << itor->nodes[0].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[1].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[2].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[3].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[4].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[5].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[6].ToString() << ", "
-            << setw(m_node_id_width) << itor->nodes[7].ToString() << ", ";
+            << setw(m_node_id_width) << itor->nodes[0].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[1].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[2].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[3].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[4].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[5].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[6].Str() << ", "
+            << setw(m_node_id_width) << itor->nodes[7].Str() << ", ";
         m_stream
             << setw(m_float_width) << itor->spring << ", "
-            << setw(m_float_width) << itor->damping;
+            << setw(m_float_width) << itor->damping
+            << endl;
     }
 
     m_stream << endl; // Empty line
 }
 
-void Serializer::ProcessBeams(File::Module* module)
+void Serializer::ProcessBeams(Module* module)
 {
     if (module->beams.empty())
     {
         return;
     }
+    this->ResetGroup();
 
     // Group beams by presets
     std::map< BeamDefaults*, std::vector<Beam*> > beams_by_preset;
@@ -1782,12 +1912,11 @@ void Serializer::ProcessBeams(File::Module* module)
         ProcessBeamDefaults(preset);
 
         // Write beams
-        std::vector<Beam*> & beam_list = preset_itor->second;
-        auto beam_itor_end = beam_list.end();
-        for (auto beam_itor = beam_list.begin(); beam_itor != beam_itor_end; ++beam_itor)
+        int current_group_id = -1;
+        for (Beam* beam: preset_itor->second)
         {
-            Beam & beam = *(*beam_itor);
-            ProcessBeam(beam);
+            this->UpdateGroup(module, beam->editor_group_id);
+            ProcessBeam(*beam);
         }
     }
 
@@ -1795,7 +1924,7 @@ void Serializer::ProcessBeams(File::Module* module)
     m_stream << endl;
 }
 
-void Serializer::ProcessShocks(File::Module* module)
+void Serializer::ProcessShocks(Module* module)
 {
     if (module->shocks.empty())
     {
@@ -1850,7 +1979,7 @@ void Serializer::ProcessShocks(File::Module* module)
     m_stream << endl;
 }
 
-void Serializer::ProcessShocks2(File::Module* module)
+void Serializer::ProcessShocks2(Module* module)
 {
     if (module->shocks_2.empty())
     {
@@ -1905,7 +2034,7 @@ void Serializer::ProcessShocks2(File::Module* module)
     m_stream << endl;
 }
 
-void Serializer::ProcessShocks3(File::Module* module)
+void Serializer::ProcessShocks3(Module* module)
 {
     if (module->shocks_3.empty())
     {
@@ -1960,7 +2089,7 @@ void Serializer::ProcessShocks3(File::Module* module)
     m_stream << endl;
 }
 
-void Serializer::ProcessHydros(File::Module* module)
+void Serializer::ProcessHydros(Module* module)
 {
     if (module->hydros.empty())
     {
@@ -2015,7 +2144,7 @@ void Serializer::ProcessHydros(File::Module* module)
     m_stream << endl << endl;
 }
 
-void Serializer::ProcessCommands2(File::Module* module)
+void Serializer::ProcessCommands2(Module* module)
 {
     if (module->commands_2.empty())
     {
@@ -2048,7 +2177,7 @@ void Serializer::ProcessCommands2(File::Module* module)
     }
 
     // Write section "commands2" to file (commands from section "commands" are converted)
-    m_stream << "commands" << endl << endl;
+    m_stream << "commands2" << endl << endl;
     auto preset_itor_end = commands_by_preset.end();
     for (auto preset_itor = commands_by_preset.begin(); preset_itor != preset_itor_end; ++preset_itor)
     {
@@ -2073,8 +2202,8 @@ void Serializer::ProcessCommands2(File::Module* module)
 void Serializer::ProcessCommand2(Command2 & def)
 {
     m_stream << "\t"
-        << std::setw(m_node_id_width) << def.nodes[0].ToString()    << ", "
-        << std::setw(m_node_id_width) << def.nodes[1].ToString()    << ", ";
+        << std::setw(m_node_id_width) << def.nodes[0].Str()    << ", "
+        << std::setw(m_node_id_width) << def.nodes[1].Str()    << ", ";
 
     m_stream << std::setw(m_float_width) << def.shorten_rate        << ", ";
     m_stream << std::setw(m_float_width) << def.lengthen_rate       << ", ";
@@ -2096,23 +2225,27 @@ void Serializer::ProcessCommand2(Command2 & def)
     m_stream << ", ";
 
     // Description
-    m_stream << (def.description.length() > 0 ? def.description : "_") << ", ";
+    m_stream << (def.description.length() > 0 ? def.description : "_");
     
-    // Inertia 
-    m_stream << std::setw(m_float_width) << def.inertia.start_delay_factor        << ", ";
-    m_stream << std::setw(m_float_width) << def.inertia.stop_delay_factor         << ", ";
-    m_stream << std::setw(m_inertia_function_width) << def.inertia.start_function << ", ";
-    m_stream << std::setw(m_inertia_function_width) << def.inertia.stop_function  << ", ";
-    m_stream << std::setw(m_float_width) << def.affect_engine                     << ", ";
-    m_stream << std::setw(m_bool_width) << (def.needs_engine ? "true" : "false");
+    // Inertia
+    if (def.inertia.start_function != "" && def.inertia.stop_function != "")
+    {
+        m_stream << ", ";
+        m_stream << std::setw(m_float_width) << def.inertia.start_delay_factor        << ", ";
+        m_stream << std::setw(m_float_width) << def.inertia.stop_delay_factor         << ", ";
+        m_stream << std::setw(m_inertia_function_width) << def.inertia.start_function << ", ";
+        m_stream << std::setw(m_inertia_function_width) << def.inertia.stop_function  << ", ";
+        m_stream << std::setw(m_float_width) << def.affect_engine                     << ", ";
+        m_stream << std::setw(m_bool_width) << (def.needs_engine ? "true" : "false");
+    }
     m_stream << endl;
 }
 
 void Serializer::ProcessHydro(Hydro & def)
 {
     m_stream << "\t"
-        << std::setw(m_node_id_width) << def.nodes[0].ToString() << ", "
-        << std::setw(m_node_id_width) << def.nodes[1].ToString() << ", ";
+        << std::setw(m_node_id_width) << def.nodes[0].Str() << ", "
+        << std::setw(m_node_id_width) << def.nodes[1].Str() << ", ";
 
     m_stream << std::setw(m_float_width) << def.lenghtening_factor      << ", ";
     if (def.options.empty())
@@ -2143,8 +2276,8 @@ void Serializer::ProcessHydro(Hydro & def)
 void Serializer::ProcessShock(Shock & def)
 {
     m_stream << "\t"
-        << std::setw(m_node_id_width) << def.nodes[0].ToString() << ", "
-        << std::setw(m_node_id_width) << def.nodes[1].ToString() << ", ";
+        << std::setw(m_node_id_width) << def.nodes[0].Str() << ", "
+        << std::setw(m_node_id_width) << def.nodes[1].Str() << ", ";
     m_stream << std::setw(m_float_width) << def.spring_rate      << ", ";
     m_stream << std::setw(m_float_width) << def.damping          << ", ";
     m_stream << std::setw(m_float_width) << def.short_bound      << ", ";
@@ -2183,8 +2316,8 @@ void Serializer::ProcessShock(Shock & def)
 void Serializer::ProcessShock2(Shock2 & def)
 {
     m_stream << "\t"
-        << std::setw(m_node_id_width) << def.nodes[0].ToString() << ", "
-        << std::setw(m_node_id_width) << def.nodes[1].ToString() << ", ";
+        << std::setw(m_node_id_width) << def.nodes[0].Str() << ", "
+        << std::setw(m_node_id_width) << def.nodes[1].Str() << ", ";
 
     m_stream << std::setw(m_float_width) << def.spring_in                  << ", ";
     m_stream << std::setw(m_float_width) << def.damp_in                    << ", ";
@@ -2201,7 +2334,7 @@ void Serializer::ProcessShock2(Shock2 & def)
     m_stream << std::setw(m_float_width) << def.precompression             << ", ";
 
     // Options
-    if (def.options != 0)
+    if (def.options == 0)
     {
         m_stream << "n"; // Placeholder
     }
@@ -2232,8 +2365,8 @@ void Serializer::ProcessShock2(Shock2 & def)
 void Serializer::ProcessShock3(Shock3 & def)
 {
     m_stream << "\t"
-        << std::setw(m_node_id_width) << def.nodes[0].ToString() << ", "
-        << std::setw(m_node_id_width) << def.nodes[1].ToString() << ", ";
+        << std::setw(m_node_id_width) << def.nodes[0].Str() << ", "
+        << std::setw(m_node_id_width) << def.nodes[1].Str() << ", ";
 
     m_stream << std::setw(m_float_width) << def.spring_in                  << ", ";
     m_stream << std::setw(m_float_width) << def.damp_in                    << ", ";
@@ -2276,13 +2409,17 @@ void Serializer::ProcessShock3(Shock3 & def)
     m_stream << endl;
 }
 
-void Serializer::ProcessBeamDefaults(BeamDefaults* beam_defaults, const char* prefix)
+void Serializer::ProcessBeamDefaults(BeamDefaults* beam_defaults)
 {
     if (beam_defaults == nullptr)
     {
+        // reset everything to defaults
+        m_stream << "\tset_beam_defaults       -1, -1, -1, -1, -1, -1, -1" << endl;
+        m_stream << "\tset_beam_defaults_scale -1, -1, -1, -1" << endl;
         return;
     }
-    m_stream << prefix << "set_beam_defaults       " // Align with "set_beam_defaults_scale"
+
+    m_stream << "\tset_beam_defaults       " // Extra spaces to align with "set_beam_defaults_scale"
         << beam_defaults->springiness           << ", "
         << beam_defaults->damping_constant      << ", "
         << beam_defaults->deformation_threshold << ", "
@@ -2293,7 +2430,7 @@ void Serializer::ProcessBeamDefaults(BeamDefaults* beam_defaults, const char* pr
         << endl;
 
     BeamDefaultsScale & scale = beam_defaults->scale;
-    m_stream << prefix << "set_beam_defaults_scale "
+    m_stream << "\tset_beam_defaults_scale "
         << scale.springiness << ", "
         << scale.damping_constant << ", "
         << scale.deformation_threshold_constant << ", "
@@ -2304,8 +2441,8 @@ void Serializer::ProcessBeamDefaults(BeamDefaults* beam_defaults, const char* pr
 void Serializer::ProcessBeam(Beam & beam)
 {
     m_stream << "\t"
-        << std::setw(m_node_id_width) << beam.nodes[0].ToString() << ", "
-        << std::setw(m_node_id_width) << beam.nodes[1].ToString() << ", ";
+        << std::setw(m_node_id_width) << beam.nodes[0].Str() << ", "
+        << std::setw(m_node_id_width) << beam.nodes[1].Str() << ", ";
 
     // Options
     if (beam.options == 0u)
@@ -2336,7 +2473,7 @@ void Serializer::ProcessBeam(Beam & beam)
     m_stream << endl;
 }
 
-void Serializer::ProcessNodes(File::Module* module)
+void Serializer::ProcessNodes(Module* module)
 {
     if (module->nodes.empty())
     {
@@ -2345,19 +2482,27 @@ void Serializer::ProcessNodes(File::Module* module)
 
     // Group nodes by presets + find node-zero
     // TODO: Handle minimass presets!
-    std::map< NodeDefaults*, std::vector<Node*> > nodes_by_presets;
+    size_t num_named = 0;
+    std::unordered_map< NodeDefaults*, std::vector<Node*> > nodes_by_presets;
     Node* node_zero = nullptr;
     auto itor_end = module->nodes.end(); 
     for (auto itor = module->nodes.begin(); itor != itor_end; ++itor)
     {
         Node & node = *itor;
+        if (node.id.IsTypeNamed())
+        {
+            ++num_named;
+        }
 
         // Check zero node
-        if (node.id.IsValid() && node.id.Str().empty() && node.id.Num() == 0)
+        if (node.id.IsValid() && node.id.Str() == "0" && node.id.Num() == 0)
         {
             if (node_zero != nullptr)
             {
-                throw std::runtime_error("FATAL: Multiple nodes zero!!!");
+                RoR::Str<200> msg;
+                msg << "Multiple nodes '0' found when serializing actor '" << m_truck->name << "'";
+                RoR::LogFormat("[RoR] Warning: '%s'", msg.ToCStr());
+                RoR::App::GetGuiManager()->ShowMessageBox("Warning!", msg.ToCStr());
             }
             node_zero = &node;
             continue;
@@ -2384,53 +2529,52 @@ void Serializer::ProcessNodes(File::Module* module)
 
     // == Write nodes to file ==
     m_stream << "nodes" << endl << endl;
+    this->ResetGroup();
 
     // Node zero first
     if (node_zero == nullptr)
     {
-        throw std::runtime_error("FATAL: Node zero not defined!!!");
+        RoR::Str<200> msg;
+        msg << "N '0' not found when serializing actor '" << m_truck->name << "'";
+        RoR::LogFormat("[RoR] Warning: '%s'", msg.ToCStr());
+        RoR::App::GetGuiManager()->ShowMessageBox("Warning!", msg.ToCStr());
     }
-    ProcessNodeDefaults(node_zero->node_defaults.get());
-    ProcessNode(*node_zero);
+    this->UpdateGroup(module, node_zero->editor_group_id);
+    this->ProcessNodeDefaults(node_zero->node_defaults.get());
+    this->ProcessNode(*node_zero);
 
-    // Other numbered nodes
-    auto preset_itor_end = nodes_by_presets.end();
-    for (auto preset_itor = nodes_by_presets.begin(); preset_itor != preset_itor_end; ++preset_itor)
+    // Numbered nodes
+    for (auto preset_pair: nodes_by_presets)
     {
-        // Write preset
-        NodeDefaults* preset = preset_itor->first;
-        ProcessNodeDefaults(preset);
+        this->ProcessNodeDefaults(preset_pair.first);
 
-        // Write nodes
-        std::vector<Node*> & node_list = preset_itor->second;
-        auto node_itor_end = node_list.end();
-        for (auto node_itor = node_list.begin(); node_itor != node_itor_end; ++node_itor)
+        int current_group_id = -1;
+        for (Truck::Node* node: preset_pair.second)
         {
-            Node & node = *(*node_itor);
-            if (node.id.Str().empty()) // Numbered nodes only
+            if (node->id.IsTypeNumbered())
             {
-                ProcessNode(node);
+                this->UpdateGroup(module, node->editor_group_id);
+                this->ProcessNode(*node);
             }
         }
     }
 
-    // Other named nodes
-    m_stream << endl << endl << "nodes2" << endl << endl;
-    for (auto preset_itor = nodes_by_presets.begin(); preset_itor != preset_itor_end; ++preset_itor)
+    // Named nodes
+    if (num_named > 0)
     {
-        // Write preset
-        NodeDefaults* preset = preset_itor->first;
-        ProcessNodeDefaults(preset);
-
-        // Write nodes
-        std::vector<Node*> & node_list = preset_itor->second;
-        auto node_itor_end = node_list.end();
-        for (auto node_itor = node_list.begin(); node_itor != node_itor_end; ++node_itor)
+        m_stream << endl << endl << "nodes2" << endl;
+        for (auto preset_pair: nodes_by_presets)
         {
-            Node & node = *(*node_itor);
-            if (!node.id.Str().empty() && node.id.Num() == 0) // Named nodes only
+            this->ProcessNodeDefaults(preset_pair.first);
+
+            for (Truck::Node* node: preset_pair.second)
             {
-                ProcessNode(node);
+                int current_group_id = -1;
+                if (node->id.IsTypeNamed())
+                {
+                    this->UpdateGroup(module, node->editor_group_id);
+                    this->ProcessNode(*node);
+                }
             }
         }
     }
@@ -2441,10 +2585,10 @@ void Serializer::ProcessNodes(File::Module* module)
 
 void Serializer::ProcessNodeDefaults(NodeDefaults* node_defaults)
 {
-    m_stream << "set_node_defaults ";
+    m_stream << "\tset_node_defaults ";
     if (node_defaults == nullptr)
     {
-        m_stream << "-1, -1, -1, -1, n" << endl;
+        m_stream << "-1, -1, -1, -1, n" << endl; // reset all to defaults
         return;
     }
 
@@ -2461,44 +2605,35 @@ void Serializer::ProcessNodeDefaults(NodeDefaults* node_defaults)
 
 void Serializer::ProcessNodeOptions(unsigned int options)
 {
-    // Mouse grab
-    m_stream << (BITMASK_IS_1(options, Node::OPTION_m_NO_MOUSE_GRAB) ? "m" : "n");
+    if (options == 0)
+    {
+        m_stream << 'n'; // Placeholder (OPTION_n_MOUSE_GRAB constant is obsolete and will be removed)
+        return;
+    }
 
-    if (BITMASK_IS_1(options, Node::OPTION_b_EXTRA_BUOYANCY))
+    if (options & Node::OPTION_m_NO_MOUSE_GRAB     ) { m_stream << 'm'; }
+    if (options & Node::OPTION_f_NO_SPARKS         ) { m_stream << 'f'; }
+    if (options & Node::OPTION_x_EXHAUST_POINT     ) { m_stream << 'x'; }
+    if (options & Node::OPTION_y_EXHAUST_DIRECTION ) { m_stream << 'y'; }
+    if (options & Node::OPTION_c_NO_GROUND_CONTACT ) { m_stream << 'c'; }
+    if (options & Node::OPTION_h_HOOK_POINT        ) { m_stream << 'h'; }
+    if (options & Node::OPTION_e_TERRAIN_EDIT_POINT) { m_stream << 'e'; }
+    if (options & Node::OPTION_b_EXTRA_BUOYANCY    ) { m_stream << 'b'; }
+    if (options & Node::OPTION_p_NO_PARTICLES      ) { m_stream << 'p'; }
+    if (options & Node::OPTION_L_LOG               ) { m_stream << 'L'; }
+    if (options & Node::OPTION_l_LOAD_WEIGHT       ) { m_stream << 'l'; }
+}
+
+void Serializer::ProcessMinimassPreset(MinimassPreset* minimass_preset)
+{
+    m_stream << "\tset_default_minimass ";
+    if (minimass_preset != nullptr)
     {
-        m_stream << "b";
+        m_stream << minimass_preset->min_mass << endl;
     }
-    if (BITMASK_IS_1(options, Node::OPTION_c_NO_GROUND_CONTACT))
+    else
     {
-        m_stream << "c";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_f_NO_SPARKS))
-    {
-        m_stream << "f";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_h_HOOK_POINT))
-    {
-        m_stream << "h";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_l_LOAD_WEIGHT))
-    {
-        m_stream << "l";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_L_LOG))
-    {
-        m_stream << "L";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_p_NO_PARTICLES))
-    {
-        m_stream << "p";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_x_EXHAUST_POINT))
-    {
-        m_stream << "x";
-    }
-    if (BITMASK_IS_1(options, Node::OPTION_y_EXHAUST_DIRECTION))
-    {
-        m_stream << "y";
+        m_stream << "-1" << endl; // reset to default
     }
 }
 
@@ -2506,7 +2641,7 @@ void Serializer::ProcessNode(Node & node)
 {
     m_stream 
         << "\t" 
-        << std::setw(m_node_id_width) << node.id.ToString() << ", " 
+        << std::setw(m_node_id_width) << node.id.Str() << ", " 
         << std::setw(m_float_width) << node.position.x << ", " 
         << std::setw(m_float_width) << node.position.y << ", " 
         << std::setw(m_float_width) << node.position.z << ", ";
@@ -2523,39 +2658,39 @@ void Serializer::ProcessNode(Node & node)
 
 void Serializer::WriteFlags()
 {
-    if (m_rig_def->enable_advanced_deformation)
+    if (m_truck->enable_advanced_deformation)
     {
         m_stream << "enable_advanced_deformation" << endl << endl;
     }
-    if (m_rig_def->hide_in_chooser)
+    if (m_truck->hide_in_chooser)
     {
         m_stream << "hideInChooser" << endl << endl;
     }
-    if (m_rig_def->slide_nodes_connect_instantly)
+    if (m_truck->slide_nodes_connect_instantly)
     {
         m_stream << "slidenode_connect_instantly" << endl << endl;
     }
-    if (m_rig_def->lockgroup_default_nolock)
+    if (m_truck->lockgroup_default_nolock)
     {
         m_stream << "lockgroup_default_nolock" << endl << endl;
     }
-    if (m_rig_def->rollon)
+    if (m_truck->rollon)
     {
         m_stream << "rollon" << endl << endl;
     }
-    if (m_rig_def->rescuer)
+    if (m_truck->rescuer)
     {
         m_stream << "rescuer" << endl << endl;
     }
-    if (m_rig_def->disable_default_sounds)
+    if (m_truck->disable_default_sounds)
     {
         m_stream << "disabledefaultsounds" << endl << endl;
     }
-    if (m_rig_def->forward_commands)
+    if (m_truck->forward_commands)
     {
         m_stream << "forwardcommands" << endl << endl;
     }
-    if (m_rig_def->import_commands)
+    if (m_truck->import_commands)
     {
         m_stream << "importcommands" << endl << endl;
     }
@@ -2563,12 +2698,12 @@ void Serializer::WriteFlags()
 
 void Serializer::ProcessFileinfo()
 {
-    if (m_rig_def->file_info.get() != nullptr)
+    if (m_truck->file_info.get() != nullptr)
     {
         m_stream << "fileinfo ";
-        m_stream << m_rig_def->file_info->unique_id;
-        m_stream << ", " << m_rig_def->file_info->category_id;
-        m_stream << ", " << m_rig_def->file_info->file_version;
+        m_stream << m_truck->file_info->unique_id;
+        m_stream << ", " << m_truck->file_info->category_id;
+        m_stream << ", " << m_truck->file_info->file_version;
 
         m_stream << endl << endl;
     }
@@ -2576,18 +2711,18 @@ void Serializer::ProcessFileinfo()
 
 void Serializer::ProcessGuid()
 {
-    if (! m_rig_def->guid.empty())
+    if (! m_truck->guid.empty())
     {
-        m_stream << "guid " << m_rig_def->guid << endl << endl;
+        m_stream << "guid " << m_truck->guid << endl << endl;
     }
 }
 
 void Serializer::ProcessDescription()
 {
-    if (m_rig_def->description.size() != 0)
+    if (m_truck->description.size() != 0)
     {
         m_stream << "description";
-        for (auto itor = m_rig_def->description.begin(); itor != m_rig_def->description.end(); ++itor)
+        for (auto itor = m_truck->description.begin(); itor != m_truck->description.end(); ++itor)
         {
             std::string line = *itor;
             m_stream << endl << line;
@@ -2598,24 +2733,15 @@ void Serializer::ProcessDescription()
 
 void Serializer::ProcessAuthors()
 {
-    for (auto itor = m_rig_def->authors.begin(); itor != m_rig_def->authors.end(); ++itor)
+    for (Author const& author: m_truck->authors)
     {
-        Author & def = *itor;
-        m_stream << "author " << def.type << " ";
-        if (def._has_forum_account)
-        {
-            m_stream << def.forum_account_id << " ";
-        }
-        else
-        {
-            m_stream << "-1 ";
-        }
-        m_stream  << def.name << " " << def.email << endl;
+        m_stream << "author " << author.type << " "
+            << author.forum_account_id << " " << author.name << " " << author.email << endl;
     }
     m_stream << endl;
 }
 
-void Serializer::ProcessGlobals(File::Module* module)
+void Serializer::ProcessGlobals(Module* module)
 {
     if (module->globals.get() == nullptr)
     {
@@ -2631,3 +2757,46 @@ void Serializer::ProcessGlobals(File::Module* module)
     }
     m_stream << endl << endl;
 }
+
+void Serializer::ResetPresets()
+{
+    m_current_node_preset = nullptr;
+    m_current_beam_preset = nullptr;
+    m_current_minimass_preset = nullptr;
+}
+
+void Serializer::UpdatePresets(BeamDefaults* beam_preset, NodeDefaults* node_preset, MinimassPreset* minimass_preset)
+{
+    if (m_current_node_preset != node_preset)
+    {
+        m_current_node_preset = node_preset;
+        this->ProcessNodeDefaults(node_preset);
+    }
+
+    if (m_current_beam_preset != beam_preset)
+    {
+        m_current_beam_preset = beam_preset;
+        this->ProcessBeamDefaults(beam_preset);
+    }
+
+    if (m_current_minimass_preset != minimass_preset)
+    {
+        m_current_minimass_preset = minimass_preset;
+        this->ProcessMinimassPreset(minimass_preset);
+    }
+}
+
+void Serializer::ResetGroup()
+{
+    m_current_editor_group = -1; // No group
+}
+
+void Serializer::UpdateGroup(Module* module, int group_id)
+{
+    if (m_current_editor_group != group_id)
+    {
+        m_current_editor_group = group_id;
+        m_stream << "\t;grp:" << module->editor_groups[m_current_editor_group].name << endl;
+    }
+}
+

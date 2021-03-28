@@ -36,7 +36,7 @@
 #include "GfxScene.h"
 #include "Language.h"
 #include "PlatformUtils.h"
-#include "RigDef_Parser.h"
+#include "TruckParser.h"
 
 #include "SkinFileFormat.h"
 #include "TerrainManager.h"
@@ -278,7 +278,7 @@ void CacheSystem::ImportEntryFromJson(rapidjson::Value& j_entry, CacheEntry & ou
     out_entry.numgears =          j_entry["numgears"].GetInt();
     out_entry.enginetype =        static_cast<char>(j_entry["enginetype"].GetInt());
 
-    // Vehicle 'section-configs' (aka Modules in RigDef namespace)
+    // Vehicle 'section-configs' (aka Modules in Truck namespace)
     for (rapidjson::Value& j_module_name: j_entry["sectionconfigs"].GetArray())
     {
         out_entry.sectionconfigs.push_back(j_module_name.GetString());
@@ -514,7 +514,7 @@ void CacheSystem::ExportEntryToJson(rapidjson::Value& j_entries, rapidjson::Docu
     j_entry.AddMember("numgears",            entry.numgears,          j_doc.GetAllocator());
     j_entry.AddMember("enginetype",          entry.enginetype,        j_doc.GetAllocator());
 
-    // Vehicle 'section-configs' (aka Modules in RigDef namespace)
+    // Vehicle 'section-configs' (aka Modules in Truck namespace)
     rapidjson::Value j_sectionconfigs(rapidjson::kArrayType);
     for (std::string const & module_name: entry.sectionconfigs)
     {
@@ -668,15 +668,12 @@ void CacheSystem::AddFile(String group, Ogre::FileInfo f, String ext)
 void CacheSystem::FillTruckDetailInfo(CacheEntry& entry, Ogre::DataStreamPtr stream, String file_name, String group)
 {
     /* LOAD AND PARSE THE VEHICLE */
-    RigDef::Parser parser;
-    parser.Prepare();
+    Truck::Parser parser;
     parser.ProcessOgreStream(stream.getPointer(), group);
-    parser.GetSequentialImporter()->Disable();
-    parser.Finalize();
 
     /* RETRIEVE DATA */
 
-    std::shared_ptr<RigDef::File> def = parser.GetFile();
+    Truck::DocumentPtr def = parser.GetFile();
 
     /* Name */
     if (!def->name.empty())
@@ -689,55 +686,59 @@ void CacheSystem::FillTruckDetailInfo(CacheEntry& entry, Ogre::DataStreamPtr str
     }
 
     /* Description */
-    std::vector<Ogre::String>::iterator desc_itor = def->description.begin();
-    for (; desc_itor != def->description.end(); desc_itor++)
+    for (Truck::ModulePtr& m: def->modules)
     {
-        entry.description += *desc_itor + "\n";
+        std::vector<Ogre::String>::iterator desc_itor = m->description.begin();
+        for (; desc_itor != m->description.end(); desc_itor++)
+        {
+            entry.description += *desc_itor + "\n";
+        }
     }
 
     /* Authors */
-    std::vector<RigDef::Author>::iterator author_itor = def->authors.begin();
-    for (; author_itor != def->authors.end(); author_itor++)
+    for (Truck::ModulePtr& m: def->modules)
     {
-        AuthorInfo author;
-        author.email = author_itor->email;
-        author.id = (author_itor->_has_forum_account) ? static_cast<int>(author_itor->forum_account_id) : -1;
-        author.name = author_itor->name;
-        author.type = author_itor->type;
+        std::vector<Truck::Author>::iterator author_itor = m->authors.begin();
+        for (; author_itor != m->authors.end(); author_itor++)
+        {
+            AuthorInfo author;
+            author.email = author_itor->email;
+            author.id = (author_itor->_has_forum_account) ? static_cast<int>(author_itor->forum_account_id) : -1;
+            author.name = author_itor->name;
+            author.type = author_itor->type;
 
-        entry.authors.push_back(author);
+            entry.authors.push_back(author);
+        }
     }
 
     /* Modules (previously called "sections") */
-    std::map<Ogre::String, std::shared_ptr<RigDef::File::Module>>::iterator module_itor = def->user_modules.begin();
-    for (; module_itor != def->user_modules.end(); module_itor++)
+    for (std::string const& config: def->sectionconfig)
     {
-        entry.sectionconfigs.push_back(module_itor->second->name);
+        entry.sectionconfigs.push_back(config);
     }
 
     /* Engine */
-    /* TODO: Handle engines in modules */
-    if (def->root_module->engine != nullptr)
+    if (def->modules[0]->engine.size() > 0) // implicit module
     {
-        std::shared_ptr<RigDef::Engine> engine = def->root_module->engine;
+        Truck::Engine* engine = &def->modules[0]->engine.back();
         entry.numgears = static_cast<int>(engine->gear_ratios.size());
         entry.minrpm = engine->shift_down_rpm;
         entry.maxrpm = engine->shift_up_rpm;
         entry.torque = engine->torque;
         entry.enginetype = 't'; /* Truck (default) */
-        if (def->root_module->engoption != nullptr
-            && def->root_module->engoption->type == RigDef::Engoption::ENGINE_TYPE_c_CAR)
+        if (def->modules[0]->engoption.size() > 0
+            && def->modules[0]->engoption.back().type == Truck::Engoption::ENGINE_TYPE_c_CAR)
         {
             entry.enginetype = 'c';
         }
     }
 
     /* File info */
-    if (def->file_info != nullptr)
+    if (def->modules[0]->fileinfo.size() > 0)
     {
-        entry.uniqueid = def->file_info->unique_id;
-        entry.categoryid = static_cast<int>(def->file_info->category_id);
-        entry.version = static_cast<int>(def->file_info->file_version);
+        entry.uniqueid = def->modules[0]->fileinfo.back().unique_id;
+        entry.categoryid = static_cast<int>(def->modules[0]->fileinfo.back().category_id);
+        entry.version = static_cast<int>(def->modules[0]->fileinfo.back().file_version);
     }
     else
     {
@@ -747,102 +748,103 @@ void CacheSystem::FillTruckDetailInfo(CacheEntry& entry, Ogre::DataStreamPtr str
     }
 
     /* Vehicle type */
-    /* NOTE: RigDef::File allows modularization of vehicle type. Cache only supports single type.
+    /* NOTE: Truck::Document allows modularization of vehicle type. Cache only supports single type.
         This is a temporary solution which has undefined results for mixed-type vehicles.
     */
     ActorType vehicle_type = NOT_DRIVEABLE;
-    module_itor = def->user_modules.begin();
-    for (; module_itor != def->user_modules.end(); module_itor++)
+    auto module_itor = def->modules.begin();
+    for (; module_itor != def->modules.end(); module_itor++)
     {
-        if (module_itor->second->engine != nullptr)
+        if ((*module_itor)->engine.size() > 0)
         {
             vehicle_type = TRUCK;
         }
-        else if (module_itor->second->screwprops.size() > 0)
+        else if ((*module_itor)->screwprops.size() > 0)
         {
             vehicle_type = BOAT;
         }
         /* Note: Sections 'turboprops' and 'turboprops2' are unified in TruckParser2013 */
-        else if (module_itor->second->turbojets.size() > 0 || module_itor->second->pistonprops.size() > 0 || module_itor->second->turboprops_2.size() > 0)
+        else if ((*module_itor)->turbojets.size() > 0 || (*module_itor)->pistonprops.size() > 0 || (*module_itor)->turboprops_2.size() > 0)
         {
             vehicle_type = AIRPLANE;
         }
     }
-    /* Root module */
-    if (def->root_module->engine != nullptr)
+
+    // seek sequential data
+    for (Truck::SeqSection& elem: def->modules[0]->sequence)
     {
-        vehicle_type = TRUCK;
-    }
-    else if (def->root_module->screwprops.size() > 0)
-    {
-        vehicle_type = BOAT;
-    }
-    /* Note: Sections 'turboprops' and 'turboprops2' are unified in TruckParser2013 */
-    else if (def->root_module->turbojets.size() > 0 || def->root_module->pistonprops.size() > 0 || def->root_module->turboprops_2.size() > 0)
-    {
-        vehicle_type = AIRPLANE;
+        switch (elem.section)
+        {
+        case Truck::KEYWORD_FORWARDCOMMANDS:
+            entry.forwardcommands = true;
+            break;
+        case Truck::KEYWORD_IMPORTCOMMANDS:
+            entry.importcommands = true;
+            break;
+        case Truck::KEYWORD_GLOBALS:
+            entry.truckmass = def->modules[0]->globals[elem.index].dry_mass;
+            entry.loadmass = def->modules[0]->globals[elem.index].cargo_mass;
+            break;
+        case Truck::KEYWORD_FILEFORMATVERSION:
+            entry.fileformatversion = def->modules[0]->fileformatversion[elem.index];
+            break;
+        case Truck::KEYWORD_RESCUER:
+            entry.rescuer = true;
+            break;
+        default:;
+        }
     }
 
-    if (def->root_module->globals)
-    {
-        entry.truckmass = def->root_module->globals->dry_mass;
-        entry.loadmass = def->root_module->globals->cargo_mass;
-    }
-    
-    entry.forwardcommands = def->forward_commands;
-    entry.importcommands = def->import_commands;
-    entry.rescuer = def->rescuer;
     entry.guid = def->guid;
-    entry.fileformatversion = def->file_format_version;
-    entry.hasSubmeshs = static_cast<int>(def->root_module->submeshes.size() > 0);
-    entry.nodecount = static_cast<int>(def->root_module->nodes.size());
-    entry.beamcount = static_cast<int>(def->root_module->beams.size());
-    entry.shockcount = static_cast<int>(def->root_module->shocks.size() + def->root_module->shocks_2.size());
-    entry.fixescount = static_cast<int>(def->root_module->fixes.size());
-    entry.hydroscount = static_cast<int>(def->root_module->hydros.size());
+    entry.hasSubmeshs = static_cast<int>(def->modules[0]->cab.size() > 0);
+    entry.nodecount = static_cast<int>(def->modules[0]->nodes.size());
+    entry.beamcount = static_cast<int>(def->modules[0]->beams.size());
+    entry.shockcount = static_cast<int>(def->modules[0]->shocks.size() + def->modules[0]->shocks_2.size());
+    entry.fixescount = static_cast<int>(def->modules[0]->fixes.size());
+    entry.hydroscount = static_cast<int>(def->modules[0]->hydros.size());
     entry.driveable = vehicle_type;
-    entry.commandscount = static_cast<int>(def->root_module->commands_2.size());
-    entry.flarescount = static_cast<int>(def->root_module->flares_2.size());
-    entry.propscount = static_cast<int>(def->root_module->props.size());
-    entry.wingscount = static_cast<int>(def->root_module->wings.size());
-    entry.turbopropscount = static_cast<int>(def->root_module->turboprops_2.size());
-    entry.rotatorscount = static_cast<int>(def->root_module->rotators.size() + def->root_module->rotators_2.size());
-    entry.exhaustscount = static_cast<int>(def->root_module->exhausts.size());
-    entry.custom_particles = def->root_module->particles.size() > 0;
-    entry.turbojetcount = static_cast<int>(def->root_module->turbojets.size());
-    entry.flexbodiescount = static_cast<int>(def->root_module->flexbodies.size());
-    entry.soundsourcescount = static_cast<int>(def->root_module->soundsources.size() + def->root_module->soundsources.size());
+    entry.commandscount = static_cast<int>(def->modules[0]->commands_2.size());
+    entry.flarescount = static_cast<int>(def->modules[0]->flares_2.size());
+    entry.propscount = static_cast<int>(def->modules[0]->props.size());
+    entry.wingscount = static_cast<int>(def->modules[0]->wings.size());
+    entry.turbopropscount = static_cast<int>(def->modules[0]->turboprops_2.size());
+    entry.rotatorscount = static_cast<int>(def->modules[0]->rotators.size() + def->modules[0]->rotators_2.size());
+    entry.exhaustscount = static_cast<int>(def->modules[0]->exhausts.size());
+    entry.custom_particles = def->modules[0]->particles.size() > 0;
+    entry.turbojetcount = static_cast<int>(def->modules[0]->turbojets.size());
+    entry.flexbodiescount = static_cast<int>(def->modules[0]->flexbodies.size());
+    entry.soundsourcescount = static_cast<int>(def->modules[0]->soundsources.size() + def->modules[0]->soundsources.size());
 
     entry.wheelcount = 0;
     entry.propwheelcount = 0;
-    for (const auto& w : def->root_module->wheels)
+    for (const auto& w : def->modules[0]->wheels)
     {
         entry.wheelcount++;
-        if (w.propulsion != RigDef::Wheels::PROPULSION_NONE)
+        if (w.propulsion != Truck::Wheels::PROPULSION_NONE)
             entry.propwheelcount++;
     }
-    for (const auto& w : def->root_module->wheels_2)
+    for (const auto& w : def->modules[0]->wheels_2)
     {
         entry.wheelcount++;
-        if (w.propulsion != RigDef::Wheels::PROPULSION_NONE)
+        if (w.propulsion != Truck::Wheels::PROPULSION_NONE)
             entry.propwheelcount++;
     }
-    for (const auto& w : def->root_module->mesh_wheels)
+    for (const auto& w : def->modules[0]->mesh_wheels)
     {
         entry.wheelcount++;
-        if (w.propulsion != RigDef::Wheels::PROPULSION_NONE)
+        if (w.propulsion != Truck::Wheels::PROPULSION_NONE)
             entry.propwheelcount++;
     }
-    for (const auto& w : def->root_module->flex_body_wheels)
+    for (const auto& w : def->modules[0]->flex_body_wheels)
     {
         entry.wheelcount++;
-        if (w.propulsion != RigDef::Wheels::PROPULSION_NONE)
+        if (w.propulsion != Truck::Wheels::PROPULSION_NONE)
             entry.propwheelcount++;
     }
 
-    if (!def->root_module->axles.empty())
+    if (!def->modules[0]->axles.empty())
     {
-        entry.propwheelcount = static_cast<int>(def->root_module->axles.size() * 2);
+        entry.propwheelcount = static_cast<int>(def->modules[0]->axles.size() * 2);
     }
 
     /* NOTE: std::shared_ptr cleans everything up. */
@@ -1086,7 +1088,8 @@ void CacheSystem::LoadResource(CacheEntry& t)
             // A vehicle bundle - use `inGlobalPool=false` to prevent resource name conflicts.
             // See bottom 'note' at https://ogrecave.github.io/ogre/api/latest/_resource-_management.html#Resource-Groups
             ResourceGroupManager::getSingleton().createResourceGroup(group, /*inGlobalPool=*/false);
-            ResourceGroupManager::getSingleton().addResourceLocation(t.resource_bundle_path, t.resource_bundle_type, group);
+            ResourceGroupManager::getSingleton().addResourceLocation(t.resource_bundle_path, t.resource_bundle_type, group,
+                /*recursive=*/false, /*readOnly=*/t.resource_bundle_type != "FileSystem");
 
             App::GetContentManager()->InitManagedMaterials(group);
             App::GetContentManager()->AddResourcePack(ContentManager::ResourcePack::TEXTURES, group);
@@ -1120,6 +1123,7 @@ void CacheSystem::ReLoadResource(CacheEntry& t)
 
     this->UnLoadResource(t);
     this->LoadResource(t); // Will create the same resource group again
+    this->ParseKnownFiles(t.resource_group); // Looks for new files (existing are skipped)
 }
 
 void CacheSystem::UnLoadResource(CacheEntry& t)
@@ -1129,7 +1133,7 @@ void CacheSystem::UnLoadResource(CacheEntry& t)
         return; // Not loaded - nothing to do
     }
 
-    // IMPORTANT! No actors must use the bundle after reloading, use RoR::MsgType::MSG_EDI_RELOAD_BUNDLE_REQUESTED
+    // IMPORTANT! No actors must use the bundle after unloading, use RoR::MsgType::MSG_EDI_RELOAD_BUNDLE_REQUESTED
 
     std::string resource_group = t.resource_group; // Keep local copy, the CacheEntry will be blanked!
     for (CacheEntry& i_entry: m_entries)
@@ -1142,7 +1146,6 @@ void CacheSystem::UnLoadResource(CacheEntry& t)
     }
 
     Ogre::ResourceGroupManager::getSingleton().destroyResourceGroup(resource_group);
-    this->LoadResource(t); // Will create the same resource group again
 }
 
 CacheEntry* CacheSystem::FetchSkinByName(std::string const & skin_name)

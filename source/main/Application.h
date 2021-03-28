@@ -98,6 +98,7 @@ enum MsgType
     MSG_EDI_ENTER_TERRN_EDITOR_REQUESTED,
     MSG_EDI_LEAVE_TERRN_EDITOR_REQUESTED,
     MSG_EDI_RELOAD_BUNDLE_REQUESTED,       //!< Payload = RoR::CacheEntry* (weak)
+    MSG_EDI_EXPORT_TRUCK_REQUESTED,        //!< Payload = RoR::CacheEntry* (weak), Description = filename | empty
 };
 
 enum class AppState
@@ -317,6 +318,8 @@ extern CVar* diag_hide_wheels;
 extern CVar* diag_hide_nodes;
 extern CVar* diag_physics_dt;
 extern CVar* diag_terrn_log_roads;
+extern CVar* diag_import_grp_loose;
+extern CVar* diag_actor_dump;
 
 // System
 extern CVar* sys_process_dir;

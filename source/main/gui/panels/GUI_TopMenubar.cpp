@@ -191,12 +191,10 @@ void TopMenubar::Update()
                 {
                     if (ImGui::Button(_LC("TopMenubar", "Reload current vehicle")))
                     {
-                        {
-                            ActorModifyRequest* rq = new ActorModifyRequest;
-                            rq->amr_type = ActorModifyRequest::Type::RELOAD;
-                            rq->amr_actor = current_actor;
-                            App::GetGameContext()->PushMessage(Message(MSG_SIM_MODIFY_ACTOR_REQUESTED, (void*)rq));
-                        }
+                        ActorModifyRequest* rq = new ActorModifyRequest;
+                        rq->amr_type = ActorModifyRequest::Type::RELOAD;
+                        rq->amr_actor = current_actor;
+                        App::GetGameContext()->PushMessage(Message(MSG_SIM_MODIFY_ACTOR_REQUESTED, (void*)rq));
                     }
 
                     if (ImGui::Button(_LC("TopMenubar", "Remove current vehicle")))
@@ -512,6 +510,11 @@ void TopMenubar::Update()
                     App::GetGuiManager()->SetVisible_NodeBeamUtils(true);
                     m_open_menu = TopMenu::TOPMENU_NONE;
                 }
+
+                if (ImGui::Button(_LC("TopMenubar", "Export current vehicle")))
+                {
+                    App::GetGameContext()->PushMessage(Message(MSG_EDI_EXPORT_TRUCK_REQUESTED, (void*)current_actor->GetCacheEntry()));
+                }
             }
 
             ImGui::Separator();
@@ -682,10 +685,8 @@ void TopMenubar::DrawMpUserToActorList(RoRnet::UserInfo &user)
     }
 
     // Display user in list
-    Ogre::ColourValue player_color;
 #ifdef USE_SOCKETW
-    player_color = App::GetNetwork()->GetPlayerColor(user.colournum);
-#endif
+    const Ogre::ColourValue player_color = App::GetNetwork()->GetPlayerColor(user.colournum);
     ImVec4 player_gui_color(player_color.r, player_color.g, player_color.b, 1.f);
     ImGui::PushStyleColor(ImGuiCol_Text, player_gui_color);
     ImGui::Text("%s: %u (%s, Ver: %s, Lang: %s)",
@@ -693,6 +694,7 @@ void TopMenubar::DrawMpUserToActorList(RoRnet::UserInfo &user)
                 App::GetNetwork()->UserAuthToStringShort(user).c_str(),
                 user.clientversion, user.language);
     ImGui::PopStyleColor();
+#endif // USE_SOCKETW
 
     // Display actor list
     int i = 0;

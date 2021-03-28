@@ -33,7 +33,7 @@
 using namespace Ogre;
 using namespace RoR;
 
-Turbojet::Turbojet(Actor* actor, int tnodefront, int tnodeback, int tnoderef, RigDef::Turbojet & def)
+Turbojet::Turbojet(Actor* actor, NodeIdx_t tnodefront, NodeIdx_t tnodeback, NodeIdx_t tnoderef, Truck::Turbojet & def)
 {
     m_actor = actor;
 #ifdef USE_OPENAL
@@ -70,7 +70,7 @@ Turbojet::Turbojet(Actor* actor, int tnodefront, int tnodeback, int tnoderef, Ri
     reset();
 }
 
-void TurbojetVisual::SetupVisuals(RigDef::Turbojet & def, int num, std::string const& propname, Ogre::Entity* nozzle, Ogre::Entity* afterburner_flame, bool disable_smoke)
+void TurbojetVisual::SetupVisuals(Truck::Turbojet & def, int num, std::string const& propname, Ogre::Entity* nozzle, Ogre::Entity* afterburner_flame, bool disable_smoke)
 {
     m_radius = def.back_diameter / 2.0;
     m_number = num;
@@ -107,11 +107,14 @@ void TurbojetVisual::SetupVisuals(RigDef::Turbojet & def, int num, std::string c
     }
 }
 
-void TurbojetVisual::SetNodes(int front, int back, int ref)
+void TurbojetVisual::SetNodes(NodeIdx_t front, NodeIdx_t back, NodeIdx_t ref)
 {
-    m_node_front = static_cast<uint16_t>(front);
-    m_node_back  = static_cast<uint16_t>(back);
-    m_node_ref   = static_cast<uint16_t>(ref);
+    ROR_ASSERT(front != node_t::INVALID_IDX);
+    ROR_ASSERT(back != node_t::INVALID_IDX);
+
+    m_node_front = front;
+    m_node_back  = back;
+    m_node_ref   = ref;
 }
 
 Turbojet::~Turbojet()

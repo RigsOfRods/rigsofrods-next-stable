@@ -28,7 +28,7 @@
 
 #include "Application.h"
 #include "Language.h"
-#include "RigDef_File.h"
+#include "TruckFileFormat.h"
 #include "SimData.h"
 
 #include <Ogre.h>
@@ -81,7 +81,7 @@ public:
 
     Ogre::String resource_group;        //!< Resource group of the loaded bundle. Empty if not loaded yet.
 
-    std::shared_ptr<RigDef::File> actor_def; //!< Cached actor definition (aka truckfile) after first spawn
+    Truck::DocumentPtr actor_def; //!< Cached actor definition (aka truckfile) after first spawn
     std::shared_ptr<RoR::SkinDef> skin_def;  //!< Cached skin info, added on first use or during cache rebuild
 
     // following all TRUCK detail information:
@@ -158,7 +158,7 @@ enum class CacheSearchMethod // Always case-insensitive
 
 struct CacheQuery
 {
-    RoR::LoaderType                cqy_filter_type = RoR::LoaderType::LT_None;
+    LoaderType                     cqy_filter_type = LoaderType::LT_None;
     int                            cqy_filter_category_id = CacheCategoryId::CID_All;
     std::string                    cqy_filter_guid; //!< Exact match; leave empty to disable
     CacheSearchMethod              cqy_search_method = CacheSearchMethod::NONE;
@@ -181,7 +181,7 @@ class CacheSystem : public ZeroedMemoryAllocator
 {
 public:
     typedef std::map<int, Ogre::String> CategoryIdNameMap;
-
+    
     CacheSystem();
 
     enum CacheValidityState
