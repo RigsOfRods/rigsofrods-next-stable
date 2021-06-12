@@ -639,6 +639,7 @@ int main(int argc, char *argv[])
                         actor->GetGfxActor()->SetAllMeshesVisible(false);
                         actor->GetGfxActor()->SetCastShadows(false);
                         actor->GetGfxActor()->SetRodsVisible(false);
+                        actor->StopAllSounds(); // Stop sounds
                     }
                     break;
 
@@ -654,6 +655,7 @@ int main(int argc, char *argv[])
                         actor->GetGfxActor()->SetAllMeshesVisible(true);
                         actor->GetGfxActor()->SetCastShadows(true);
                         actor->GetGfxActor()->SetRodsVisible(true);
+                        actor->UnmuteAllSounds(); // Unmute sounds
                     }
                     break;
 
