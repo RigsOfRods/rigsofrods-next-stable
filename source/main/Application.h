@@ -84,10 +84,10 @@ enum MsgType
     MSG_SIM_LOAD_TERRN_REQUESTED,
     MSG_SIM_LOAD_SAVEGAME_REQUESTED,
     MSG_SIM_UNLOAD_TERRN_REQUESTED,
-    MSG_SIM_SPAWN_ACTOR_REQUESTED,         //!< Payload = ActorSpawnRequest* (owner)
-    MSG_SIM_MODIFY_ACTOR_REQUESTED,        //!< Payload = ActorModifyRequest* (owner)
-    MSG_SIM_DELETE_ACTOR_REQUESTED,        //!< Payload = Actor* (weak)
-    MSG_SIM_SEAT_PLAYER_REQUESTED,         //!< Payload = Actor* (weak) | nullptr
+    MSG_SIM_SPAWN_ACTOR_REQUESTED,         //!< Payload = RoR::ActorSpawnRequest* (owner)
+    MSG_SIM_MODIFY_ACTOR_REQUESTED,        //!< Payload = RoR::ActorModifyRequest* (owner)
+    MSG_SIM_DELETE_ACTOR_REQUESTED,        //!< Payload = RoR::Actor* (weak)
+    MSG_SIM_SEAT_PLAYER_REQUESTED,         //!< Payload = RoR::Actor* (weak) | nullptr
     MSG_SIM_TELEPORT_PLAYER_REQUESTED,     //!< Payload = Ogre::Vector3* (owner)
     // GUI
     MSG_GUI_OPEN_MENU_REQUESTED,
@@ -97,7 +97,7 @@ enum MsgType
     MSG_GUI_MP_CLIENTS_REFRESH,
     MSG_GUI_SHOW_MESSAGE_BOX_REQUESTED,    //!< Payload = MessageBoxConfig* (owner)
     // Editing
-    MSG_EDI_MODIFY_GROUNDMODEL_REQUESTED,  //!< Payload = ground_model_t* (weak)
+    MSG_EDI_MODIFY_GROUNDMODEL_REQUESTED,  //!< Payload = RoR::ground_model_t* (weak)
     MSG_EDI_ENTER_TERRN_EDITOR_REQUESTED,
     MSG_EDI_LEAVE_TERRN_EDITOR_REQUESTED,
     MSG_EDI_RELOAD_BUNDLE_REQUESTED,       //!< Payload = RoR::CacheEntry* (weak)
