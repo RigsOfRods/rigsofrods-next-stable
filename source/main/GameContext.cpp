@@ -745,6 +745,10 @@ void GameContext::UpdateGlobalInputEvents()
             {
                 App::GetGuiManager()->SetVisible_GameSettings(false);
             }
+            else if (App::GetGuiManager()->IsVisible_GameControls())
+            {
+                App::GetGuiManager()->SetVisible_GameControls(false);
+            }
             else if (App::GetGuiManager()->IsVisible_MultiplayerSelector())
             {
                 App::GetGuiManager()->SetVisible_MultiplayerSelector(false);
@@ -759,6 +763,10 @@ void GameContext::UpdateGlobalInputEvents()
             if (App::GetGuiManager()->IsVisible_MainSelector())
             {
                 App::GetGuiManager()->GetMainSelector()->Close();
+            }
+            else if (App::GetGuiManager()->IsVisible_GameControls())
+            {
+                App::GetGuiManager()->SetVisible_GameControls(false);
             }
             else if (App::sim_state->GetEnum<SimState>() == SimState::RUNNING)
             {
@@ -1219,6 +1227,24 @@ void GameContext::UpdateCommonInputEvents(float dt)
     }
 }
 
+// Internal heper for UpdateAirplaneInputEvents()
+void smoothValue(float& ref, float value, float rate)
+{
+    if (value < -1)
+        value = -1;
+    if (value > 1)
+        value = 1;
+    // smooth!
+    if (ref > value)
+    {
+        ref -= rate;
+        if (ref < value)
+            ref = value;
+    }
+    else if (ref < value)
+        ref += rate;
+}
+
 void GameContext::UpdateAirplaneInputEvents(float dt)
 {
     if (m_player_actor->isBeingReset() || m_player_actor->ar_physics_paused)
@@ -1235,7 +1261,7 @@ void GameContext::UpdateAirplaneInputEvents(float dt)
     float tmp_left = App::GetInputEngine()->getEventValue(EV_AIRPLANE_STEER_LEFT);
     float tmp_right = App::GetInputEngine()->getEventValue(EV_AIRPLANE_STEER_RIGHT);
     float sum_steer = -tmp_left + tmp_right;
-    App::GetInputEngine()->smoothValue(m_player_actor->ar_aileron, sum_steer, dt * commandrate);
+    smoothValue(m_player_actor->ar_aileron, sum_steer, dt * commandrate);
     m_player_actor->ar_hydro_dir_command = m_player_actor->ar_aileron;
     m_player_actor->ar_hydro_speed_coupling = !(App::GetInputEngine()->isEventAnalog(EV_AIRPLANE_STEER_LEFT) && App::GetInputEngine()->isEventAnalog(EV_AIRPLANE_STEER_RIGHT));
 
@@ -1243,13 +1269,13 @@ void GameContext::UpdateAirplaneInputEvents(float dt)
     float tmp_pitch_up = App::GetInputEngine()->getEventValue(EV_AIRPLANE_ELEVATOR_UP);
     float tmp_pitch_down = App::GetInputEngine()->getEventValue(EV_AIRPLANE_ELEVATOR_DOWN);
     float sum_pitch = tmp_pitch_down - tmp_pitch_up;
-    App::GetInputEngine()->smoothValue(m_player_actor->ar_elevator, sum_pitch, dt * commandrate);
+    smoothValue(m_player_actor->ar_elevator, sum_pitch, dt * commandrate);
 
     // rudder
     float tmp_rudder_left = App::GetInputEngine()->getEventValue(EV_AIRPLANE_RUDDER_LEFT);
     float tmp_rudder_right = App::GetInputEngine()->getEventValue(EV_AIRPLANE_RUDDER_RIGHT);
     float sum_rudder = tmp_rudder_left - tmp_rudder_right;
-    App::GetInputEngine()->smoothValue(m_player_actor->ar_rudder, sum_rudder, dt * commandrate);
+    smoothValue(m_player_actor->ar_rudder, sum_rudder, dt * commandrate);
 
     // brakes
     if (!m_player_actor->ar_parking_brake)
@@ -1489,10 +1515,10 @@ void GameContext::UpdateTruckInputEvents(float dt)
         m_player_actor->ar_right_mirror_angle += 0.001;
 
     // steering
-    float tmp_left_digital  = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_LEFT , false, InputEngine::ET_DIGITAL);
-    float tmp_right_digital = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_RIGHT, false, InputEngine::ET_DIGITAL);
-    float tmp_left_analog   = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_LEFT , false, InputEngine::ET_ANALOG);
-    float tmp_right_analog  = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_RIGHT, false, InputEngine::ET_ANALOG);
+    float tmp_left_digital  = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_LEFT , false, InputSourceType::IST_DIGITAL);
+    float tmp_right_digital = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_RIGHT, false, InputSourceType::IST_DIGITAL);
+    float tmp_left_analog   = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_LEFT , false, InputSourceType::IST_ANALOG);
+    float tmp_right_analog  = App::GetInputEngine()->getEventValue(EV_TRUCK_STEER_RIGHT, false, InputSourceType::IST_ANALOG);
 
     float sum = -std::max(tmp_left_digital, tmp_left_analog) + std::max(tmp_right_digital, tmp_right_analog);
 

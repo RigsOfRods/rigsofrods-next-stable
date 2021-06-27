@@ -2,7 +2,7 @@
     This source file is part of Rigs of Rods
     Copyright 2005-2012 Pierre-Michel Ricordel
     Copyright 2007-2012 Thomas Fischer
-    Copyright 2013-2017 Petr Ohlidal
+    Copyright 2013-2021 Petr Ohlidal
 
     For more information, see http://www.rigsofrods.org/
 
@@ -19,10 +19,10 @@
     along with Rigs of Rods. If not, see <http://www.gnu.org/licenses/>.
 */
 
-/** 
-    @file   InputEngine.h
-    @brief  Input logic.
-*/
+///    @file
+///    @brief Handles controller inputs from player.
+///           Defines input events and binding mechanism, see `eventtypes`, `events`.
+///           Reads bindings from "*.map" file(s).
 
 #pragma once
 
@@ -37,8 +37,6 @@
 #include "OISKeyboard.h"
 #include "OISMouse.h"
 
-// config filename
-#define CONFIGFILENAME "input.map"
 #define MAX_JOYSTICKS 10
 #define MAX_JOYSTICK_POVS 4
 #define MAX_JOYSTICK_SLIDERS 4
@@ -59,7 +57,15 @@ enum eventtypes
     ET_JoystickAxisRel,
     ET_JoystickPov,
     ET_JoystickSliderX,
-    ET_JoystickSliderY
+    ET_JoystickSliderY,
+    ET_END
+};
+
+enum class InputSourceType
+{
+    IST_ANY,
+    IST_DIGITAL,
+    IST_ANALOG
 };
 
 enum events
@@ -398,6 +404,7 @@ struct event_trigger_t
 {
     // general
     enum eventtypes eventtype;
+    int configDeviceID;            //!< For which device (which config file) was this binding defined?
     // keyboard
     int keyCode;
     bool explicite;
@@ -432,88 +439,100 @@ struct event_trigger_t
     char group[128];
     char tmp_eventname[128];
     char comments[1024];
-    int suid; //session unique id
 };
 
 /// Manages controller configuration, evaluates input events
 class InputEngine : public ZeroedMemoryAllocator
 {
 public:
+    typedef std::vector<event_trigger_t> TriggerVec;
+    typedef std::map<int, TriggerVec> EventMap;
 
-    enum
-    {
-        ET_ANY,
-        ET_DIGITAL,
-        ET_ANALOG
-    };
+    std::string DEFAULT_MAPFILE = "input.map";
 
     InputEngine();
     ~InputEngine();
 
-    void Capture();
-    void ProcessMouseEvent(const OIS::MouseEvent& arg);
-    void ProcessKeyPress(const OIS::KeyEvent& arg);
-    void ProcessKeyRelease(const OIS::KeyEvent& arg);
-    void ProcessJoystickEvent(const OIS::JoyStickEvent& arg);
+        // Setup
 
-    void SetKeyboardListener(OIS::KeyListener* obj);
-    void SetMouseListener(OIS::MouseListener* obj);
-    void SetJoystickListener(OIS::JoyStickListener* obj);
+    void                SetKeyboardListener(OIS::KeyListener* obj);
+    OIS::Keyboard*      GetOisKeyboard() { return mKeyboard; }
+    void                SetMouseListener(OIS::MouseListener* obj);
+    void                SetJoystickListener(OIS::JoyStickListener* obj);
+    void                destroy();
 
-    //valueSource: ET_ANY=digital and analog devices, ET_DIGITAL=only digital, ET_ANALOG=only analog
-    float getEventValue(int eventID, bool pure = false, int valueSource = ET_ANY);
+        // Input processing
 
-    bool getEventBoolValue(int eventID);
-    bool isEventAnalog(int eventID);
-    bool getEventBoolValueBounce(int eventID, float time = 0.2f);
-    float getEventBounceTime(int eventID);
-    Ogre::String getKeyForCommand(int eventID);
-    bool isKeyDown(OIS::KeyCode mod); //!< Asks OIS directly
-    bool isKeyDownEffective(OIS::KeyCode mod); //!< Reads RoR internal buffer
-    bool isKeyDownValueBounce(OIS::KeyCode mod, float time = 0.2f);
+    void                Capture();
+    void                updateKeyBounces(float dt);
+    void                ProcessMouseEvent(const OIS::MouseEvent& arg);
+    void                ProcessKeyPress(const OIS::KeyEvent& arg);
+    void                ProcessKeyRelease(const OIS::KeyEvent& arg);
+    void                ProcessJoystickEvent(const OIS::JoyStickEvent& arg);
+    void                resetKeys();
 
-    std::map<int, std::vector<event_trigger_t>>& getEvents() { return events; };
+        // Event info
 
-    Ogre::String getDeviceName(event_trigger_t evt);
-    std::string getEventTypeName(int type);
+    Ogre::String        getKeyForCommand(int eventID);
+    Ogre::String        getDeviceName(event_trigger_t const& evt);
+    Ogre::String        getEventCommand(int eventID);
+    bool                isEventDefined(int eventID);
+    int                 getKeboardKeyForCommand(int eventID);               //!< Returns -1 if not Keyboard
+    int                 getJoyComponentCount(OIS::ComponentType type, int joystickNumber);
+    std::string         getJoyVendor(int joystickNumber);
+    int                 getNumJoysticks() { return free_joysticks; }
+    EventMap&           getEvents() { return events; };
 
-    int getCurrentKeyCombo(std::string* combo);
-    int getCurrentJoyButton(int& joystickNumber, int& button);
-    int getCurrentPovValue(int& joystickNumber, int& pov, int& povdir);
-    std::string getKeyNameForKeyCode(OIS::KeyCode keycode);
-    void resetKeys();
+        // Event config files
+
+    bool                loadConfigFile(int deviceID = -1);                  //!< Loads config file specific to a device and OS (or default config if deviceID is -1).
+    bool                saveConfigFile(int deviceID = -1);                  //!< Wites events with matching deviceID to loaded file with matching deviceID (or default file if deviceID is -1).
+    std::string const&  getLoadedConfigFile(int deviceID = -1);             //!< Returns filename from `loadConfigFile()` call.
+    bool                processLine(const char* line, int deviceID = -1);
+    bool                updateConfigline(event_trigger_t* t);
+
+        // Event management
+
+    void                addEvent(int eventID, event_trigger_t& t);
+    void                updateEvent(int eventID, const event_trigger_t& t);
+    void                eraseEvent(int eventID, const event_trigger_t* t);
+    void                clearEvents(int eventID);                           //!< Clears all bindings for given event.
+    void                clearEventsByDevice(int deviceID);                  //!< Clears all bindings with given deviceID (-1 is no exception).
+    void                clearAllEvents();                                   //!< Purges all configured bindings.
+
+        // Event states
+
+                        ///valueSource: IST_ANY=digital and analog devices, IST_DIGITAL=only digital, IST_ANALOG=only analog
+    float               getEventValue(int eventID, bool pure = false, InputSourceType valueSource = InputSourceType::IST_ANY);
+    bool                getEventBoolValue(int eventID);
+    bool                isEventAnalog(int eventID);
+    bool                getEventBoolValueBounce(int eventID, float time = 0.2f);
+    float               getEventBounceTime(int eventID);
+    bool                isKeyDownEffective(OIS::KeyCode mod);               //!< Reads RoR internal buffer
+    bool                isKeyDownValueBounce(OIS::KeyCode mod, float time = 0.2f);
+
+        // Direct input device states
+
     OIS::JoyStickState* getCurrentJoyState(int joystickNumber);
-    int getJoyComponentCount(OIS::ComponentType type, int joystickNumber);
-    std::string getJoyVendor(int joystickNumber);
-    void smoothValue(float& ref, float value, float rate);
-    bool loadMapping(std::string outfile = CONFIGFILENAME, bool append = false, int deviceID = -1);
+    OIS::MouseState     getMouseState();
+    bool                isKeyDown(OIS::KeyCode mod);                        //!< Asks OIS directly
+    int                 getCurrentKeyCombo(Ogre::String* combo);
+    int                 getCurrentJoyButton(int& joystickNumber, int& button);
+    int                 getCurrentPovValue(int& joystickNumber, int& pov, int& povdir);
 
-    void destroy();
+        // Event utils
 
-    Ogre::String getEventCommand(int eventID);
-    static int resolveEventName(Ogre::String eventName);
+    static const char*  getEventTypeName(eventtypes type);                  //!< Enum to string helper.
+    static int          resolveEventName(Ogre::String eventName);
     static Ogre::String eventIDToName(int eventID);
     static Ogre::String eventIDToDescription(int eventID);
-    event_trigger_t* getEventBySUID(int suid);
+    std::string         getKeyNameForKeyCode(OIS::KeyCode keycode);
 
-    bool isEventDefined(int eventID);
-    void addEvent(int eventID, event_trigger_t& t);
-    void updateEvent(int eventID, const event_trigger_t& t);
-    bool deleteEventBySUID(int suid);
-    OIS::MouseState getMouseState();
-    // some custom methods
+
+        // Misc
+
     void windowResized(Ogre::RenderWindow* rw);
-
-    bool reloadConfig(std::string outfile = CONFIGFILENAME);
-    bool updateConfigline(event_trigger_t* t);
-
-    int getKeboardKeyForCommand(int eventID);
-
-    void updateKeyBounces(float dt);
-    void completeMissingEvents();
     OIS::ForceFeedback* getForceFeedbackDevice() { return mForceFeedback; };
-
-    inline OIS::Keyboard* GetOisKeyboard() { return mKeyboard; }
 
 protected:
 
@@ -522,7 +541,7 @@ protected:
     OIS::Mouse* mMouse;
     OIS::Keyboard* mKeyboard;
     OIS::JoyStick* mJoy[MAX_JOYSTICKS];
-    int free_joysticks;
+    int free_joysticks; //!< Number of detected game controllers
     OIS::ForceFeedback* mForceFeedback;
     int uniqueCounter;
 
@@ -534,11 +553,13 @@ protected:
     // define event aliases
     std::map<int, std::vector<event_trigger_t>> events;
     std::map<int, float> event_times;
-
-    bool processLine(char* line, int deviceID = -1);
+    std::string m_loaded_configs[MAX_JOYSTICKS];
+    bool loadMapping(Ogre::String fileName, int deviceID);
+    bool saveMapping(Ogre::String fileName, int deviceID);
+    void completeMissingEvents();
 
     void initAllKeys();
-    bool setup();
+    void setup();
     std::map<std::string, OIS::KeyCode> allkeys;
     std::map<std::string, OIS::KeyCode>::iterator allit;
 
@@ -547,7 +568,6 @@ protected:
 
     float logval(float val);
     std::string getEventGroup(Ogre::String eventName);
-    bool mappingLoaded;
 
     event_trigger_t newEvent();
 };

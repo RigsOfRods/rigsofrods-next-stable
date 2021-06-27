@@ -22,6 +22,7 @@
 #include "InputEngine.h"
 
 #include "AppContext.h"
+#include "Console.h"
 #include "ContentManager.h"
 #include "GUIManager.h"
 #include "Language.h"
@@ -403,7 +404,6 @@ InputEngine::InputEngine() :
     , mInputManager(0)
     , mKeyboard(0)
     , mMouse(0)
-    , mappingLoaded(false)
     , uniqueCounter(0)
 {
     for (int i = 0; i < MAX_JOYSTICKS; i++)
@@ -452,7 +452,7 @@ void InputEngine::destroy()
     }
 }
 
-bool InputEngine::setup()
+void InputEngine::setup()
 {
     size_t hWnd = 0;
     App::GetAppContext()->GetRenderWindow()->getCustomAttribute("WINDOW", &hWnd);
@@ -570,50 +570,15 @@ bool InputEngine::setup()
     }
 #endif // _WIN32
 
-    //this becomes more and more convoluted!
-    if (!mappingLoaded)
+    // load default mappings
+    this->loadConfigFile(-1);
+
+    // then load device (+OS) specific mappings
+    for (int i = 0; i < free_joysticks; ++i)
     {
-        // load default one
-        loadMapping(CONFIGFILENAME);
-
-        // then load device specific ones
-        for (int i = 0; i < free_joysticks; ++i)
-        {
-            String deviceStr = mJoy[i]->vendor();
-
-            // care about unsuitable chars
-            String repl = "\\/ #@?!$%^&*()+=-><.:'|\";";
-            for (unsigned int c = 0; c < repl.size(); c++)
-            {
-                deviceStr = StringUtil::replaceAll(deviceStr, repl.substr(c, 1), "_");
-            }
-
-            // Look for OS-specific device mapping
-            String osSpecificMapFile;
-#if         OGRE_PLATFORM == OGRE_PLATFORM_WIN32
-            osSpecificMapFile = deviceStr + ".windows.map";
-#elif       OGRE_PLATFORM == OGRE_PLATFORM_LINUX
-            osSpecificMapFile = deviceStr + ".linux.map";
-#endif
-            if (osSpecificMapFile != "" &&
-                ResourceGroupManager::getSingleton().resourceExists(RGN_CONFIG, osSpecificMapFile))
-            {
-                loadMapping(osSpecificMapFile, true, i);
-            }
-            else
-            {
-                // Load generic device mapping
-                loadMapping(deviceStr + ".map", true, i);
-            }
-        }
-
-        mappingLoaded = true;
-        completeMissingEvents();
-
-        return false;
+        this->loadConfigFile(i);
     }
-
-    return true;
+    completeMissingEvents();
 }
 
 OIS::MouseState InputEngine::getMouseState()
@@ -780,62 +745,14 @@ float InputEngine::logval(float val)
     return -log10(1.0 / (1.1 + val)) / 1.0;
 }
 
-void InputEngine::smoothValue(float& ref, float value, float rate)
-{
-    if (value < -1)
-        value = -1;
-    if (value > 1)
-        value = 1;
-    // smooth!
-    if (ref > value)
-    {
-        ref -= rate;
-        if (ref < value)
-            ref = value;
-    }
-    else if (ref < value)
-        ref += rate;
-}
+
 
 String InputEngine::getEventCommand(int eventID)
 {
     std::vector<event_trigger_t> t_vec = events[eventID];
     if (t_vec.size() > 0)
-        return String(t_vec[0].configline);
+        return String(t_vec[0].configline); // TODO: handle multiple mappings for one event code - currently we only check the first one.
     return "";
-}
-
-event_trigger_t* InputEngine::getEventBySUID(int suid)
-{
-    std::map<int, std::vector<event_trigger_t>>::iterator a;
-    std::vector<event_trigger_t>::iterator b;
-    for (a = events.begin(); a != events.end(); a++)
-    {
-        for (b = a->second.begin(); b != a->second.end(); b++)
-        {
-            if (b->suid == suid)
-                return &(*b);
-        }
-    }
-    return 0;
-}
-
-bool InputEngine::deleteEventBySUID(int suid)
-{
-    std::map<int, std::vector<event_trigger_t>>::iterator a;
-    std::vector<event_trigger_t>::iterator b;
-    for (a = events.begin(); a != events.end(); a++)
-    {
-        for (b = a->second.begin(); b != a->second.end(); b++)
-        {
-            if (b->suid == suid)
-            {
-                a->second.erase(b);
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 bool InputEngine::isEventDefined(int eventID)
@@ -843,7 +760,7 @@ bool InputEngine::isEventDefined(int eventID)
     std::vector<event_trigger_t> t_vec = events[eventID];
     if (t_vec.size() > 0)
     {
-        if (t_vec[0].eventtype != ET_NONE)
+        if (t_vec[0].eventtype != ET_NONE) // TODO: handle multiple mappings for one event code - currently we only check the first one.
             return true;
     }
     return false;
@@ -879,7 +796,7 @@ bool InputEngine::isEventAnalog(int eventID)
                     || t_vec[i].eventtype == ET_JoystickSliderY)
                 //check if value comes from analog device
                 //this way, only valid events (e.g. joystick mapped, but unplugged) are recognized as analog events
-                && getEventValue(eventID, true, 2) != 0.0)
+                && getEventValue(eventID, true, InputSourceType::IST_ANALOG) != 0.0)
             {
                 return true;
             }
@@ -906,7 +823,7 @@ bool InputEngine::isEventAnalog(int eventID)
 #endif //0
 }
 
-float InputEngine::getEventValue(int eventID, bool pure, int valueSource)
+float InputEngine::getEventValue(int eventID, bool pure, InputSourceType valueSource /*= InputSourceType::IST_ANY*/)
 {
     float returnValue = 0;
     std::vector<event_trigger_t> t_vec = events[eventID];
@@ -915,7 +832,7 @@ float InputEngine::getEventValue(int eventID, bool pure, int valueSource)
     {
         event_trigger_t t = *i;
 
-        if (valueSource == 0 || valueSource == 1)
+        if (valueSource == InputSourceType::IST_DIGITAL || valueSource == InputSourceType::IST_ANY)
         {
             switch (t.eventtype)
             {
@@ -993,7 +910,7 @@ float InputEngine::getEventValue(int eventID, bool pure, int valueSource)
                 break;
             }
         }
-        if (valueSource == 0 || valueSource == 2)
+        if (valueSource == InputSourceType::IST_ANALOG || valueSource == InputSourceType::IST_ANY)
         {
             switch (t.eventtype)
             {
@@ -1136,7 +1053,7 @@ bool InputEngine::isKeyDownValueBounce(OIS::KeyCode mod, float time)
     }
 }
 
-String InputEngine::getDeviceName(event_trigger_t evt)
+String InputEngine::getDeviceName(event_trigger_t const& evt)
 {
     switch (evt.eventtype)
     {
@@ -1160,7 +1077,8 @@ String InputEngine::getDeviceName(event_trigger_t evt)
     return "unknown";
 }
 
-String InputEngine::getEventTypeName(int type)
+// static
+const char* InputEngine::getEventTypeName(eventtypes type)
 {
     switch (type)
     {
@@ -1176,14 +1094,13 @@ String InputEngine::getEventTypeName(int type)
     case ET_JoystickPov: return "JoystickPov";
     case ET_JoystickSliderX: return "JoystickSliderX";
     case ET_JoystickSliderY: return "JoystickSliderY";
+    default: return "unknown";
     }
-    return "unknown";
 }
 
 void InputEngine::addEvent(int eventID, event_trigger_t& t)
 {
     uniqueCounter++;
-    t.suid = uniqueCounter;
 
     if (eventID == -1)
     //unknown event, discard
@@ -1209,7 +1126,55 @@ void InputEngine::updateEvent(int eventID, const event_trigger_t& t)
     events[eventID].push_back(t);
 }
 
-bool InputEngine::processLine(char* line, int deviceID)
+void InputEngine::eraseEvent(int eventID, const event_trigger_t* t)
+{
+    if (events.find(eventID) != events.end())
+    {
+        TriggerVec& triggers = events[eventID];
+        for (size_t i = 0; i < triggers.size(); i++)
+        {
+            if (t == &triggers[i])
+            {
+                triggers.erase(triggers.begin() + i);
+                return;
+            }
+        }
+    }
+}
+
+void InputEngine::clearEvents(int eventID)
+{
+    if (events.find(eventID) != events.end())
+    {
+        events[eventID].clear();
+    }
+}
+
+void InputEngine::clearEventsByDevice(int deviceID)
+{
+    for (auto& ev_pair: events)
+    {
+        if (ev_pair.second.size() > 0)
+        {
+            auto itor = ev_pair.second.begin();
+            while (itor != ev_pair.second.end())
+            {
+                if (itor->configDeviceID == deviceID)
+                    itor = ev_pair.second.erase(itor);
+                else
+                    itor++;
+            }
+        }
+    }
+}
+
+void InputEngine::clearAllEvents()
+{
+    events.clear(); // remove all bindings
+    this->resetKeys(); // reset input states
+}
+
+bool InputEngine::processLine(const char* line, int deviceID)
 {
     static String cur_comment = "";
 
@@ -1312,7 +1277,7 @@ bool InputEngine::processLine(char* line, int deviceID)
                 return false;
             }
             event_trigger_t t_key = newEvent();
-            //memset(&t_key, 0, sizeof(event_trigger_t));
+            t_key.configDeviceID = deviceID;
             t_key.eventtype = ET_Keyboard;
             t_key.shift = shift;
             t_key.ctrl = ctrl;
@@ -1335,7 +1300,7 @@ bool InputEngine::processLine(char* line, int deviceID)
             char tmp2[256] = {};
             sscanf(line, "%s %s %d %d %s", eventName, evtype, &joyNo, &buttonNo, tmp2);
             event_trigger_t t_joy = newEvent();
-            //memset(&t_joy, 0, sizeof(event_trigger_t));
+            t_joy.configDeviceID = deviceID;
             int eventID = resolveEventName(String(eventName));
             if (eventID == -1)
                 return false;
@@ -1420,7 +1385,7 @@ bool InputEngine::processLine(char* line, int deviceID)
                 eventtype = ET_JoystickAxisRel;
 
             event_trigger_t t_joy = newEvent();
-            //memset(&t_joy, 0, sizeof(event_trigger_t));
+            t_joy.configDeviceID = deviceID;
             t_joy.eventtype = eventtype;
             t_joy.joystickAxisRegion = jAxisRegion;
             t_joy.joystickAxisUseDigital = usedigital;
@@ -1445,6 +1410,7 @@ bool InputEngine::processLine(char* line, int deviceID)
             if (eventID == -1)
                 return false;
             event_trigger_t t_none = newEvent();
+            t_none.configDeviceID = deviceID;
             t_none.eventtype = eventtype;
             //t_none.configline = "";
             strncpy(t_none.group, getEventGroup(eventName).c_str(), 128);
@@ -1488,6 +1454,7 @@ bool InputEngine::processLine(char* line, int deviceID)
                 direction = OIS::Pov::SouthWest;
 
             event_trigger_t t_pov = newEvent();
+            t_pov.configDeviceID = deviceID;
             t_pov.eventtype = eventtype;
             t_pov.joystickNumber = (deviceID == -1 ? joyNo : deviceID);
             t_pov.joystickPovNumber = povNumber;
@@ -1526,6 +1493,7 @@ bool InputEngine::processLine(char* line, int deviceID)
             }
 
             event_trigger_t t_slider = newEvent();
+            t_slider.configDeviceID = deviceID;
 
             if (type == 'Y' || type == 'y')
                 eventtype = ET_JoystickSliderY;
@@ -1680,13 +1648,6 @@ String InputEngine::getEventGroup(String eventName)
     return "";
 }
 
-bool InputEngine::reloadConfig(std::string outfile)
-{
-    events.clear();
-    loadMapping(outfile);
-    return true;
-}
-
 bool InputEngine::updateConfigline(event_trigger_t* t)
 {
     if (t->eventtype != ET_JoystickAxisAbs && t->eventtype != ET_JoystickSliderX && t->eventtype != ET_JoystickSliderY)
@@ -1757,9 +1718,6 @@ bool InputEngine::updateConfigline(event_trigger_t* t)
 
 void InputEngine::completeMissingEvents()
 {
-    if (!mappingLoaded)
-        return;
-
     for (int i = 0; i < EV_MODE_LAST; i++)
     {
         if (events.find(eventInfo[i].eventID) == events.end())
@@ -1778,24 +1736,81 @@ void InputEngine::completeMissingEvents()
     }
 }
 
-bool InputEngine::loadMapping(String outfile, bool append, int deviceID)
+// Loads config file specific to a device and OS (or default config if deviceID is -1).
+bool InputEngine::loadConfigFile(int deviceID)
+{
+    String fileName;
+    if (deviceID == -1)
+    {
+        fileName = DEFAULT_MAPFILE;
+    }
+    else
+    {
+        ROR_ASSERT(deviceID < free_joysticks);
+
+        String deviceStr = mJoy[deviceID]->vendor();
+
+        // care about unsuitable chars
+        String repl = "\\/ #@?!$%^&*()+=-><.:'|\";";
+        for (unsigned int c = 0; c < repl.size(); c++)
+        {
+            deviceStr = StringUtil::replaceAll(deviceStr, repl.substr(c, 1), "_");
+        }
+
+        // Look for OS-specific device mapping
+        String osSpecificMapFile;
+#if OGRE_PLATFORM == OGRE_PLATFORM_WIN32
+        osSpecificMapFile = deviceStr + ".windows.map";
+#elif OGRE_PLATFORM == OGRE_PLATFORM_LINUX
+        osSpecificMapFile = deviceStr + ".linux.map";
+#endif
+        if (osSpecificMapFile != "" &&
+            ResourceGroupManager::getSingleton().resourceExists(RGN_CONFIG, osSpecificMapFile))
+        {
+            fileName = osSpecificMapFile;
+        }
+        else
+        {
+            // Load generic device mapping
+            fileName = deviceStr + ".map";
+        }
+
+        m_loaded_configs[deviceID] = fileName;
+    }
+
+    return this->loadMapping(fileName, deviceID);
+}
+
+bool InputEngine::saveConfigFile(int deviceID)
+{
+    ROR_ASSERT(deviceID < free_joysticks);
+
+    if (deviceID == -1)
+        return this->saveMapping(DEFAULT_MAPFILE, deviceID);
+    else
+        return this->saveMapping(m_loaded_configs[deviceID], deviceID);
+}
+
+std::string const& InputEngine::getLoadedConfigFile(int deviceID /*= -1*/)
+{
+    ROR_ASSERT(deviceID < free_joysticks);
+    if (deviceID == -1)
+        return DEFAULT_MAPFILE;
+    else
+        return m_loaded_configs[deviceID];
+}
+
+bool InputEngine::loadMapping(String fileName, int deviceID)
 {
     char line[1025] = "";
     int oldState = uniqueCounter;
 
-    if (!append)
-    {
-        // clear everything
-        resetKeys();
-        events.clear();
-    }
-
-    LOG(" * Loading input mapping " + outfile);
+    LOG(" * Loading input mapping " + fileName);
     {
         DataStreamPtr ds;
         try
         {
-            ds = ResourceGroupManager::getSingleton().openResource(outfile, RGN_CONFIG);
+            ds = ResourceGroupManager::getSingleton().openResource(fileName, RGN_CONFIG);
         }
         catch (...)
         {
@@ -1817,6 +1832,46 @@ bool InputEngine::loadMapping(String outfile, bool append, int deviceID)
     int newEvents = uniqueCounter - oldState;
     LOG(" * Input map successfully loaded: " + TOSTRING(newEvents) + " entries");
     return true;
+}
+
+bool InputEngine::saveMapping(String fileName, int deviceID)
+{
+    const int COL1_WIDTH = 34; // total 35
+    const int COL2_WIDTH = 19; // total 20
+
+    try
+    {
+        fileName += ".dbg"; // TEST
+
+        // Open file for writing (overwrite existing).
+        Ogre::DataStreamPtr ds = Ogre::ResourceGroupManager::getSingleton().createResource(
+            fileName, RGN_CONFIG, /*overwrite:*/true);
+
+        // Loop events and filter by device.
+        for (auto& ev_pair: events)
+        {
+            for (event_trigger_t& ev: ev_pair.second)
+            {
+                if (ev.configDeviceID == deviceID)
+                {
+                    // We found a matching event - compose config line and write it.
+
+                    std::string line = fmt::format("{:<{}} {:<{}} {}\n", // padding: ("{:<{}}", "abc", 10) writes "abc       "
+                        this->eventIDToName(ev_pair.first), COL1_WIDTH,
+                        this->getEventTypeName(ev.eventtype), COL2_WIDTH,
+                        ev.configline);
+                    ds->write(line.c_str(), line.size());
+                }
+            }
+        }
+        return true; // Closes `ds`
+    }
+    catch (Ogre::Exception& e) // Already logged by OGRE
+    {
+        App::GetConsole()->putMessage(Console::CONSOLE_MSGTYPE_INFO, Console::CONSOLE_SYSTEM_ERROR,
+            fmt::format("Failed to write '{}', {}", fileName, e.getDescription()));
+        return false;
+    }
 }
 
 int InputEngine::resolveEventName(String eventName)
