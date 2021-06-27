@@ -642,6 +642,7 @@ int main(int argc, char *argv[])
                         actor->GetGfxActor()->SetRodsVisible(false);
                         actor->StopAllSounds(); // Stop sounds
                         actor->SetLightsOff(); // Turn all lights off
+                        
                     }
                     break;
 
