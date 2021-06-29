@@ -626,6 +626,43 @@ int main(int argc, char *argv[])
                     }
                     break;
 
+                case MSG_SIM_HIDE_NET_ACTOR_REQUESTED:
+                    if (App::mp_state->GetEnum<MpState>() == MpState::CONNECTED &&
+                        ((Actor*)m.payload)->ar_state == ActorState::NETWORKED_OK)
+                    {
+                        Actor* actor = (Actor*)m.payload;
+                        actor->ar_state = ActorState::NETWORKED_HIDDEN; // Stop net. updates
+                        App::GetGfxScene()->RemoveGfxActor(actor->GetGfxActor()); // Remove visuals (also stops updating SimBuffer)
+                        actor->GetGfxActor()->GetSimDataBuffer().simbuf_actor_state = ActorState::NETWORKED_HIDDEN; // Hack - manually propagate the new state to SimBuffer so Character can reflect it.
+                        actor->GetGfxActor()->SetFlexbodyVisible(false);
+                        actor->GetGfxActor()->SetWheelsVisible(false);
+                        actor->GetGfxActor()->SetAllMeshesVisible(false);
+                        actor->GetGfxActor()->SetWingsVisible(false);
+                        actor->GetGfxActor()->SetCastShadows(false);
+                        actor->GetGfxActor()->SetRodsVisible(false);
+                        actor->StopAllSounds(); // Stop sounds
+                        actor->SetLightsOff(); // Turn all lights off
+                        
+                    }
+                    break;
+
+                case MSG_SIM_UNHIDE_NET_ACTOR_REQUESTED:
+                    if (App::mp_state->GetEnum<MpState>() == MpState::CONNECTED &&
+                        ((Actor*)m.payload)->ar_state == ActorState::NETWORKED_HIDDEN)
+                    {
+                        Actor* actor = (Actor*)m.payload;
+                        actor->ar_state = ActorState::NETWORKED_OK; // Resume net. updates
+                        App::GetGfxScene()->RegisterGfxActor(actor->GetGfxActor()); // Restore visuals (also resumes updating SimBuffer)
+                        actor->GetGfxActor()->SetFlexbodyVisible(true);
+                        actor->GetGfxActor()->SetWheelsVisible(true);
+                        actor->GetGfxActor()->SetAllMeshesVisible(true);
+                        actor->GetGfxActor()->SetWingsVisible(true);
+                        actor->GetGfxActor()->SetCastShadows(true);
+                        actor->GetGfxActor()->SetRodsVisible(true);
+                        actor->UnmuteAllSounds(); // Unmute sounds
+                    }
+                    break;
+
                 // -- GUI events ---
 
                 case MSG_GUI_OPEN_MENU_REQUESTED:
@@ -785,10 +822,10 @@ int main(int argc, char *argv[])
                             App::GetGameContext()->UpdateSimInputEvents(dt);
                             App::GetGameContext()->UpdateSkyInputEvents(dt);
                             if (App::GetGameContext()->GetPlayerActor() &&
-                                App::GetGameContext()->GetPlayerActor()->ar_sim_state != Actor::SimState::NETWORKED_OK) // we are in a vehicle
+                                App::GetGameContext()->GetPlayerActor()->ar_state != ActorState::NETWORKED_OK) // we are in a vehicle
                             {
                                 App::GetGameContext()->UpdateCommonInputEvents(dt);
-                                if (App::GetGameContext()->GetPlayerActor()->ar_sim_state != Actor::SimState::LOCAL_REPLAY)
+                                if (App::GetGameContext()->GetPlayerActor()->ar_state != ActorState::LOCAL_REPLAY)
                                 {
                                     if (App::GetGameContext()->GetPlayerActor()->ar_driveable == TRUCK)
                                     {

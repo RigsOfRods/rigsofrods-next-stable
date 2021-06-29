@@ -29,6 +29,7 @@
 #include "HydraxWater.h"
 #include "GameContext.h"
 #include "GUIManager.h"
+#include "GUIUtils.h"
 #include "GUI_DirectionArrow.h"
 #include "OverlayWrapper.h"
 #include "SkyManager.h"
@@ -36,6 +37,9 @@
 #include "TerrainGeometryManager.h"
 #include "TerrainManager.h"
 #include "TerrainObjectManager.h"
+#include "Utils.h"
+
+#include "imgui_internal.h"
 
 #include <Ogre.h>
 
@@ -75,7 +79,7 @@ void GfxScene::ClearScene()
     App::GetGuiManager()->GetDirectionArrow()->CreateArrow();
 }
 
-void RoR::GfxScene::Init()
+void GfxScene::Init()
 {
     ROR_ASSERT(!m_scene_manager);
     m_scene_manager = App::GetAppContext()->GetOgreRoot()->createSceneManager(Ogre::ST_EXTERIOR_CLOSE, "main_scene_manager");
@@ -83,7 +87,7 @@ void RoR::GfxScene::Init()
     m_skidmark_conf.LoadDefaultSkidmarkDefs();
 }
 
-void RoR::GfxScene::UpdateScene(float dt_sec)
+void GfxScene::UpdateScene(float dt_sec)
 {
     // Actors - start threaded tasks
     for (GfxActor* gfx_actor: m_live_gfx_actors)
@@ -251,7 +255,7 @@ void RoR::GfxScene::UpdateScene(float dt_sec)
     }
 }
 
-void RoR::GfxScene::SetParticlesVisible(bool visible)
+void GfxScene::SetParticlesVisible(bool visible)
 {
     for (auto itor : m_dustpools)
     {
@@ -259,7 +263,7 @@ void RoR::GfxScene::SetParticlesVisible(bool visible)
     }
 }
 
-DustPool* RoR::GfxScene::GetDustPool(const char* name)
+DustPool* GfxScene::GetDustPool(const char* name)
 {
     auto found = m_dustpools.find(name);
     if (found != m_dustpools.end())
@@ -272,12 +276,12 @@ DustPool* RoR::GfxScene::GetDustPool(const char* name)
     }
 }
 
-void RoR::GfxScene::RegisterGfxActor(RoR::GfxActor* gfx_actor)
+void GfxScene::RegisterGfxActor(RoR::GfxActor* gfx_actor)
 {
     m_all_gfx_actors.push_back(gfx_actor);
 }
 
-void RoR::GfxScene::BufferSimulationData()
+void GfxScene::BufferSimulationData()
 {
     m_simbuf.simbuf_player_actor = App::GetGameContext()->GetPlayerActor();
     m_simbuf.simbuf_character_pos = App::GetGameContext()->GetPlayerCharacter()->getPosition();
@@ -312,20 +316,68 @@ void RoR::GfxScene::BufferSimulationData()
     }
 }
 
-void RoR::GfxScene::RemoveGfxActor(RoR::GfxActor* remove_me)
+void GfxScene::RemoveGfxActor(RoR::GfxActor* remove_me)
 {
     auto itor = std::remove(m_all_gfx_actors.begin(), m_all_gfx_actors.end(), remove_me);
     m_all_gfx_actors.erase(itor, m_all_gfx_actors.end());
 }
 
-void RoR::GfxScene::RegisterGfxCharacter(RoR::GfxCharacter* gfx_character)
+void GfxScene::RegisterGfxCharacter(RoR::GfxCharacter* gfx_character)
 {
     m_all_gfx_characters.push_back(gfx_character);
 }
 
-void RoR::GfxScene::RemoveGfxCharacter(RoR::GfxCharacter* remove_me)
+void GfxScene::RemoveGfxCharacter(RoR::GfxCharacter* remove_me)
 {
     auto itor = std::remove(m_all_gfx_characters.begin(), m_all_gfx_characters.end(), remove_me);
     m_all_gfx_characters.erase(itor, m_all_gfx_characters.end());
+}
+
+void GfxScene::DrawNetLabel(Ogre::Vector3 scene_pos, float cam_dist, std::string const& nick, int colornum)
+{
+        // this ensures that the nickname is always in a readable size
+        float font_size = std::max(0.6, cam_dist / 40.0);
+        std::string caption;
+        if (cam_dist > 1000) // 1000 ... vlen
+        {
+            caption =
+                nick + " (" + TOSTRING((float)(ceil(cam_dist / 100) / 10.0) ) + " km)";
+        }
+        else if (cam_dist > 20) // 20 ... vlen ... 1000
+        {
+            caption =
+                nick + " (" + TOSTRING((int)cam_dist) + " m)";
+        }
+        else // 0 ... vlen ... 20
+        {
+            caption = nick;
+        }
+
+        // draw with DearIMGUI
+
+    ImVec2 screen_size = ImGui::GetIO().DisplaySize;
+    World2ScreenConverter world2screen(
+        App::GetCameraManager()->GetCamera()->getViewMatrix(true), App::GetCameraManager()->GetCamera()->getProjectionMatrix(), Ogre::Vector2(screen_size.x, screen_size.y));
+
+    Ogre::Vector3 pos = world2screen.Convert(scene_pos);
+
+    // only draw when in front of camera
+    if (pos.z < 0.f)
+    {
+        ImVec2 text_size = ImGui::CalcTextSize(caption.c_str());
+        GUIManager::GuiTheme const& theme = App::GetGuiManager()->GetTheme();
+
+        ImDrawList* drawlist = GetImDummyFullscreenWindow();
+        ImGuiContext* g = ImGui::GetCurrentContext();
+
+        // Draw background rectangle
+        ImVec2 screen_pos(pos.x, pos.y - (text_size.y/2));
+        drawlist->AddRectFilled(ImVec2(pos.x - 4.f, pos.y - text_size.y / 2), ImVec2(pos.x + text_size.x + 4.f, pos.y + text_size.y / 2), ImColor(theme.semitransparent_window_bg), 4.f);
+
+        // draw colored text
+        Ogre::ColourValue color = App::GetNetwork()->GetPlayerColor(colornum);
+        ImVec4 text_color(color.r, color.g, color.b, 1.f);
+        drawlist->AddText(g->Font, g->FontSize, screen_pos, ImColor(text_color), caption.c_str());
+    }
 }
 

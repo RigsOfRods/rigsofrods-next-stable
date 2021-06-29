@@ -29,6 +29,7 @@
 #include "EngineSim.h"
 #include "GfxScene.h"
 #include "GUIManager.h"
+#include "GUIUtils.h"
 #include "HydraxWater.h"
 #include "FlexAirfoil.h"
 #include "FlexBody.h"
@@ -47,6 +48,8 @@
 #include "TurboJet.h"
 #include "TurboProp.h"
 #include "Utils.h"
+
+#include "imgui_internal.h"
 
 #include <Ogre.h>
 
@@ -638,16 +641,7 @@ void RoR::GfxActor::UpdateDebugView()
     World2ScreenConverter world2screen(
         App::GetCameraManager()->GetCamera()->getViewMatrix(true), App::GetCameraManager()->GetCamera()->getProjectionMatrix(), Ogre::Vector2(screen_size.x, screen_size.y));
 
-    // Dummy fullscreen window to draw to
-    int window_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar| ImGuiWindowFlags_NoInputs 
-                     | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
-    ImGui::SetNextWindowPos(ImVec2(0,0));
-    ImGui::SetNextWindowSize(screen_size);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0)); // Fully transparent background!
-    ImGui::Begin(("RoR-SoftBodyView-" + TOSTRING(m_actor->ar_instance_id)).c_str(), NULL, window_flags);
-    ImDrawList* drawlist = ImGui::GetWindowDrawList();
-    ImGui::End();
-    ImGui::PopStyleColor(1); // WindowBg
+    ImDrawList* drawlist = GetImDummyFullscreenWindow();
 
     if (m_actor->ar_physics_paused && !App::GetGuiManager()->IsGuiHidden())
     {
@@ -1726,8 +1720,6 @@ void RoR::GfxActor::SetRodsVisible(bool visible)
 
 void RoR::GfxActor::UpdateSimDataBuffer()
 {
-    m_simbuf.simbuf_live_local = (m_actor->ar_sim_state == Actor::SimState::LOCAL_SIMULATED);
-    m_simbuf.simbuf_physics_paused = m_actor->ar_physics_paused;
     m_simbuf.simbuf_pos = m_actor->GetRotationCenter();
     m_simbuf.simbuf_rotation = m_actor->getRotation();
     m_simbuf.simbuf_tyre_pressure = m_actor->GetTyrePressure().GetCurPressure();
@@ -1749,7 +1741,11 @@ void RoR::GfxActor::UpdateSimDataBuffer()
     m_simbuf.simbuf_top_speed = m_actor->ar_top_speed;
     m_simbuf.simbuf_node0_velo = m_actor->ar_nodes[0].Velocity;
     m_simbuf.simbuf_net_username = m_actor->m_net_username;
-    m_simbuf.simbuf_is_remote = m_actor->ar_sim_state == Actor::SimState::NETWORKED_OK;
+    m_simbuf.simbuf_net_colornum = m_actor->m_net_color_num;
+
+    // General info
+    m_simbuf.simbuf_actor_state = m_actor->ar_state;
+    m_simbuf.simbuf_physics_paused = m_actor->ar_physics_paused;
 
     // nodes
     const int num_nodes = m_actor->ar_num_nodes;
@@ -1875,7 +1871,7 @@ void RoR::GfxActor::UpdateSimDataBuffer()
 
 bool RoR::GfxActor::IsActorLive() const
 {
-    return (m_actor->ar_sim_state < Actor::SimState::LOCAL_SLEEPING);
+    return (m_actor->ar_state < ActorState::LOCAL_SLEEPING);
 }
 
 void RoR::GfxActor::UpdateCabMesh()
@@ -1953,7 +1949,7 @@ void RoR::GfxActor::SetWheelsVisible(bool value)
 
 
 int RoR::GfxActor::GetActorId          () const { return m_actor->ar_instance_id; }
-int RoR::GfxActor::GetActorState       () const { return static_cast<int>(m_actor->ar_sim_state); }
+int RoR::GfxActor::GetActorState       () const { return static_cast<int>(m_actor->ar_state); }
 
 ActorType RoR::GfxActor::GetActorDriveable() const
 {
@@ -2050,39 +2046,22 @@ void RoR::GfxActor::UpdateAeroEngines()
 
 void RoR::GfxActor::UpdateNetLabels(float dt)
 {
-    // TODO: Remake network player labels via GUI... they shouldn't be billboards inside the scene ~ only_a_ptr, 05/2018
-    if (m_actor->m_net_label_node && m_actor->m_net_label_mt)
-    {
-        if (App::mp_hide_net_labels->GetBool() || (!m_simbuf.simbuf_is_remote && App::mp_hide_own_net_label->GetBool()))
+        const bool is_remote = 
+            m_simbuf.simbuf_actor_state == ActorState::NETWORKED_OK ||
+            m_simbuf.simbuf_actor_state == ActorState::NETWORKED_HIDDEN;
+
+        if (App::mp_hide_net_labels->GetBool() || (!is_remote && App::mp_hide_own_net_label->GetBool()))
         {
-            m_actor->m_net_label_mt->setVisible(false);
             return;
         }
 
         float vlen = m_simbuf.simbuf_pos.distance(App::GetCameraManager()->GetCameraNode()->getPosition());
 
         float y_offset = (m_simbuf.simbuf_aabb.getMaximum().y - m_simbuf.simbuf_pos.y) + (vlen / 100.0);
-        m_actor->m_net_label_node->setPosition(m_simbuf.simbuf_pos + Ogre::Vector3::UNIT_Y * y_offset);
+        Ogre::Vector3 scene_pos = m_simbuf.simbuf_pos + Ogre::Vector3::UNIT_Y * y_offset;
 
-        // this ensures that the nickname is always in a readable size
-        m_actor->m_net_label_mt->setCharacterHeight(std::max(0.6, vlen / 40.0));
+    App::GetGfxScene()->DrawNetLabel(scene_pos, vlen, m_simbuf.simbuf_net_username, m_simbuf.simbuf_net_colornum);
 
-        if (vlen > 1000) // 1000 ... vlen
-        {
-            m_actor->m_net_label_mt->setCaption(
-                m_simbuf.simbuf_net_username + " (" + TOSTRING((float)(ceil(vlen / 100) / 10.0) ) + " km)");
-        }
-        else if (vlen > 20) // 20 ... vlen ... 1000
-        {
-            m_actor->m_net_label_mt->setCaption(
-                m_simbuf.simbuf_net_username + " (" + TOSTRING((int)vlen) + " m)");
-        }
-        else // 0 ... vlen ... 20
-        {
-            m_actor->m_net_label_mt->setCaption(m_simbuf.simbuf_net_username);
-        }
-        m_actor->m_net_label_mt->setVisible(true);
-    }
 }
 
 void RoR::GfxActor::CalculateDriverPos(Ogre::Vector3& out_pos, Ogre::Quaternion& out_rot)
@@ -3306,6 +3285,33 @@ void RoR::GfxActor::SetAllMeshesVisible(bool visible)
     this->SetWheelsVisible(visible);
     this->SetPropsVisible(visible);
     this->SetFlexbodyVisible(visible);
+}
+
+void RoR::GfxActor::SetWingsVisible(bool visible)
+{
+    for (int i = 0; i < m_actor->ar_num_wings; ++i)
+    {
+        if (!visible)
+        {
+            m_actor->ar_wings[i].cnode->setVisible(false);
+        }
+        else
+        {
+            m_actor->ar_wings[i].cnode->setVisible(true);
+        }
+    }
+
+    for (size_t i=0; i< m_actor->ar_airbrakes.size(); ++i)
+    {
+        if (!visible)
+        {
+            m_gfx_airbrakes[i].abx_scenenode->setVisible(false);
+        }
+        else
+        {
+            m_gfx_airbrakes[i].abx_scenenode->setVisible(true);
+        }
+    }
 }
 
 void RoR::GfxActor::UpdateWingMeshes()

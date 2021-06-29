@@ -632,9 +632,27 @@ void RoR::GfxCharacter::UpdateCharacterInScene()
     }
 
     // Position + Orientation
+    Ogre::Entity* entity = static_cast<Ogre::Entity*>(xc_scenenode->getAttachedObject(0));
     if (xc_simbuf.simbuf_actor_coupling != nullptr)
     {
-        if (xc_simbuf.simbuf_actor_coupling->GetGfxActor()->HasDriverSeatProp())
+        // We're in vehicle
+        GfxActor* gfx_actor = xc_simbuf.simbuf_actor_coupling->GetGfxActor();
+
+        // Update character visibility first
+        switch (gfx_actor->GetSimDataBuffer().simbuf_actor_state)
+        {
+        case ActorState::NETWORKED_HIDDEN:
+            entity->setVisible(false);
+            break;
+        case ActorState::NETWORKED_OK:
+            entity->setVisible(gfx_actor->HasDriverSeatProp());
+            break;
+        default:
+            break; // no change.
+        }
+
+        // If visible, update position
+        if (entity->isVisible())
         {
             if (xc_movable_text != nullptr)
             {
@@ -657,7 +675,6 @@ void RoR::GfxCharacter::UpdateCharacterInScene()
     }
 
     // Animation
-    Ogre::Entity* entity = static_cast<Ogre::Entity*>(xc_scenenode->getAttachedObject(0));
     if (xc_simbuf.simbuf_anim_name != xc_simbuf_prev.simbuf_anim_name)
     {
         // 'Classic' method - enable one anim, exterminate the others ~ only_a_ptr, 06/2018
@@ -721,19 +738,10 @@ void RoR::GfxCharacter::UpdateCharacterInScene()
             }
 
             float camDist = (xc_scenenode->getPosition() - App::GetCameraManager()->GetCameraNode()->getPosition()).length();
+            Ogre::Vector3 scene_pos = xc_scenenode->getPosition();
+            scene_pos.y += (1.9f + camDist / 100.0f);
 
-            xc_movable_text->setCaption(xc_simbuf.simbuf_net_username);
-            if (camDist > 1000.0f)
-                xc_movable_text->setCaption(xc_simbuf.simbuf_net_username + "  (" + TOSTRING((float)(ceil(camDist / 100) / 10.0f)) + " km)");
-            else if (camDist > 20.0f && camDist <= 1000.0f)
-                xc_movable_text->setCaption(xc_simbuf.simbuf_net_username + "  (" + TOSTRING((int)camDist) + " m)");
-            else
-                xc_movable_text->setCaption(xc_simbuf.simbuf_net_username);
-
-            float h = std::max(9.0f, camDist * 1.2f);
-            xc_movable_text->setAdditionalHeight(1.9f + camDist / 100.0f);
-            xc_movable_text->setCharacterHeight(h);
-            xc_movable_text->setVisible(true);
+            App::GetGfxScene()->DrawNetLabel(scene_pos, camDist, xc_simbuf.simbuf_net_username, xc_simbuf.simbuf_color_number);
         }
     }
 #endif // USE_SOCKETW

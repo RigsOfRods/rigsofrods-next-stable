@@ -22,12 +22,13 @@
 #pragma once
 
 #include "Application.h"
-#include "SimData.h"
 #include "CmdKeyInertia.h"
+#include "Differentials.h"
 #include "GfxActor.h"
 #include "MovableText.h"
 #include "PerVehicleCameraContext.h"
 #include "RigDef_Prerequisites.h"
+#include "SimData.h"
 #include "TyrePressure.h"
 
 #include <Ogre.h>
@@ -44,14 +45,6 @@ class Actor : public ZeroedMemoryAllocator
     friend class GfxActor; // Temporary until all visuals are moved there. ~ only_a_ptr, 2018
     friend class OutGauge;
 public:
-
-    enum class SimState
-    {
-        LOCAL_SIMULATED,  //!< simulated (local) actor
-        NETWORKED_OK,     //!< not simulated (remote) actor
-        LOCAL_REPLAY,
-        LOCAL_SLEEPING,   //!< sleeping (local) actor
-    };
 
     Actor(
           int actor_id
@@ -88,6 +81,7 @@ public:
     void              UpdateSoundSources();
     void              HandleMouseMove(int node, Ogre::Vector3 pos, float force); //!< Event handler
     void              ToggleLights();                      //!< Event handler
+    void              SetLightsOff();
     void              ToggleTies(int group=-1);
     void              ToggleRopes(int group=-1);            //!< Event handler
     void              ToggleHooks(int group=-1, HookAction mode=HOOK_TOGGLE, int node_number=-1); //!< Event handler
@@ -333,10 +327,12 @@ public:
     Ogre::Timer       ar_net_timer;
     unsigned long     ar_net_last_update_time;
     DashBoardManager* ar_dashboard;
-    SimState          ar_sim_state;                   //!< Sim state
     float             ar_collision_range;             //!< Physics attr
     float             ar_top_speed;                   //!< Sim state
     ground_model_t*   ar_last_fuzzy_ground_model;     //!< GUI state
+
+    // Gameplay state
+    ActorState        ar_state;
 
     // Realtime node/beam structure editing helpers
     void                    SearchBeamDefaults();     //!< Searches for more stable beam defaults
@@ -453,6 +449,7 @@ private:
     MovableText*      m_net_label_mt;
     Ogre::SceneNode*  m_net_label_node;
     Ogre::UTFString   m_net_username;
+    int               m_net_color_num;
     Ogre::Timer       m_reset_timer;
     Ogre::Vector3     m_rotation_request_center;
     float             m_rotation_request;         //!< Accumulator
