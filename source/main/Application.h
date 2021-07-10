@@ -66,6 +66,7 @@ enum MsgType
     MSG_APP_MODCACHE_LOAD_REQUESTED,
     MSG_APP_MODCACHE_UPDATE_REQUESTED,
     MSG_APP_MODCACHE_PURGE_REQUESTED,
+    MSG_APP_LOAD_ADDON_REQUESTED,          //!< Payload = RoR::CacheEntry* (weak)
     // Networking
     MSG_NET_CONNECT_REQUESTED,
     MSG_NET_CONNECT_STARTED,
@@ -238,6 +239,7 @@ enum LoaderType //!< Operation mode for GUI::MainSelector
     LT_Load,      // Script "load",      ext: load
     LT_Extension, // Script "extension", ext: trailer load
     LT_Skin,      // No script alias, invoked automatically
+    LT_Addon,     // For Query interface only! No script alias.
     LT_AllBeam    // Invocable from GUI; Script "all",  ext: truck car boat airplane train load
 };
 

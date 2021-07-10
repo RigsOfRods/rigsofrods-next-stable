@@ -179,6 +179,7 @@ set(SOURCE_FILES
         physics/water/ScrewProp.{h,cpp}
         resources/CacheSystem.{h,cpp}
         resources/ContentManager.{h,cpp}
+        resources/addon_fileformat/AddonFileFormat.{h,cpp}
         resources/otc_fileformat/OTCFileFormat.{h,cpp}
         resources/odef_fileformat/ODefFileFormat.{h,cpp}
         resources/rig_def_fileformat/RigDef_File.{h,cpp}
@@ -224,7 +225,9 @@ if (ROR_USE_ANGELSCRIPT)
     list(APPEND SOURCE_FILES
             scripting/GameScript.{h,cpp}
             scripting/LocalStorage.{h,cpp}
-            scripting/OgreAngelscript.{h,cpp}
+            scripting/FrameStepAngelscript.cpp
+            scripting/OgreAngelscript.cpp
+            scripting/ImGuiAngelscript.cpp
             scripting/OgreScriptBuilder.{h,cpp}
             scripting/ScriptEngine.{h,cpp}
             )
@@ -329,8 +332,9 @@ target_include_directories(${BINNAME} PRIVATE
         physics/utils
         physics/water
         resources
-        resources/odef_fileformat/
-        resources/otc_fileformat/
+        resources/addon_fileformat
+        resources/odef_fileformat
+        resources/otc_fileformat
         resources/rig_def_fileformat
         resources/skin_fileformat
         resources/terrn2_fileformat

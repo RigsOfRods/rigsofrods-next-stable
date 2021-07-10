@@ -21,6 +21,8 @@
 
 
 #include "GUI_ConsoleWindow.h"
+
+#include "GameContext.h"
 #include "GUIManager.h"
 
 #include "Language.h"
@@ -70,6 +72,11 @@ void ConsoleWindow::Draw()
             }
 
             ImGui::Columns(1); // reset
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu(_LC("Console", "Addons")))
+        {
+            this->DrawAddonSelector();
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -162,3 +169,44 @@ void ConsoleWindow::TextEditCallbackProc(ImGuiTextEditCallbackData *data)
     }
 }
 
+void ConsoleWindow::DrawAddonSelector()
+{
+    // Initial refresh
+    if (!m_addons_refreshed)
+    {
+        m_addons_query.cqy_filter_type = LT_Addon;
+        App::GetCacheSystem()->Query(m_addons_query);
+        m_addons_refreshed = true;
+    }
+
+    // Scroll area
+    ImGui::BeginChild("scrolling", ImVec2(400.f, 150.f), false);
+
+    // Addons
+    for (int i = 0; i < (int)m_addons_query.cqy_results.size(); i++)
+    {
+        ImGui::PushID(i);
+        CacheEntry* entry = m_addons_query.cqy_results[i].cqr_entry;
+
+        if (ImGui::CollapsingHeader(entry->dname.c_str()))
+        {
+            ImGui::TextDisabled("%s", entry->resource_bundle_path.c_str());
+
+            // 2nd column - actions
+            if (ImGui::Button(_LC("AddonSetup", "Load")))
+            {
+                App::GetGameContext()->PushMessage(Message(MSG_APP_LOAD_ADDON_REQUESTED, (void*)entry));
+            }
+            ImGui::SameLine();
+            bool autoload = false; // TODO
+            if (ImGui::Checkbox(_LC("AddonSetup", "AutoLoad"), &autoload))
+            {
+                // MSG_APP_SETUP_ADDON_REQUESTED
+            }
+        }
+
+        ImGui::PopID();
+    }
+    ImGui::Columns(1);
+    ImGui::EndChild(); // End of scroll area
+}
